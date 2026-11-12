@@ -1757,7 +1757,6 @@ function updateWorld(dt) {
   gTime += dt;
   if (G.flagT != null && G.flagT < 1) G.flagT = Math.min(1, G.flagT + dt/1.3);  // спуск полотнища — ровно один раз
   if (shakeT > 0) { shakeT -= dt; if (shakeT <= 0) shakeA = 0; }
-  if (G.note) { G.note.t -= dt; if (G.note.t <= 0) G.note = null; }
   if (G.state === 'play') {
     G.timeLeft -= dt;
     G.lvlTime += dt;                   // статистика для звёзд и итогов уровня
@@ -2986,20 +2985,23 @@ function netSbChan(role) {             // открыть канал-комнат
       return;
     }
     if (NET.dial !== dial) return;                    // игрок уже отменил
+    clearTimeout(NET.sb.ff); clearTimeout(NET.sb.wd); // переподписка: старые сторожа не копим
     try { chan.track({ role }); } catch (e) {}        // presence: «я в комнате»
     if (role === 'guest') {                           // стучимся, пока хост не ответит
       netSbTo('host', { t:'JOIN', fr:NET.sb.me });
-      NET.sb.t = setInterval(() => {
+      if (!NET.sb.t) NET.sb.t = setInterval(() => {   // ретраи: одно подключение — один интервал
         if (NET.dial === 'join' && !NET.conn) netSbTo('host', { t:'JOIN', fr:NET.sb.me });
       }, 1800);
+      NET.sb.ff = setTimeout(() => {                  // быстрый отказ: presence жив, а хоста нет
+        if (NET.dial === dial && !NET.conn &&
+            NET.sb.pres && !NET.sb.pres.host) netSbFail(role, false);
+      }, 6000);
+      NET.sb.wd = setTimeout(() => {                  // сторож гостя: хост так и не объявился
+        if (NET.dial === dial && !NET.conn) netSbFail(role, false);
+      }, SB_WD);
     }
-    NET.sb.ff = setTimeout(() => {                    // быстрый отказ: presence жив, а хоста нет
-      if (NET.dial === dial && !NET.conn &&
-          NET.sb.pres && !NET.sb.pres.host) netSbFail(role, false);
-    }, 6000);
-    NET.sb.wd = setTimeout(() => {                    // сторож: хост так и не объявился
-      if (NET.dial === dial && !NET.conn) netSbFail(role, false);
-    }, SB_WD);
+    /* хост в лобби ждёт БЕЗ ограничений: сокет держат heartbeat-ы realtime-js,
+       при обрыве он переподключается сам и подписка придёт сюда снова */
   });
 }
 function netClose() {
@@ -3230,7 +3232,6 @@ function updateArenaEnemies(dt) {
 function updateArena(dt, ce) {
   gTime += dt;
   if (shakeT > 0) { shakeT -= dt; if (shakeT <= 0) shakeA = 0; }
-  if (G.note) { G.note.t -= dt; if (G.note.t <= 0) G.note = null; }
   if (ARN.banner > 0) ARN.banner -= dt;
   // кооп: в финале/паузе обычный поток пакетов останавливается — держим канал живым,
   // иначе напарник не узнает о финале, а хост отвалит гостя по тишине
@@ -4350,6 +4351,9 @@ function frame(now) {
   if (acc > STEP) acc = 0;                    // не успеваем — сбрасываем накопитель, без лага
   fpsN++; fpsT += dt;
   if (fpsT >= 0.5) { fpsVal = Math.round(fpsN / fpsT); fpsN = 0; fpsT = 0; }
+  // подсказки тикают в ЛЮБОМ экране (меню, магазин, лобби) — иначе «не хватает
+  // монет» и «напарник отключился» висят вечно, пока экран не сменится
+  if (G.note) { G.note.t -= dt; if (G.note.t <= 0) G.note = null; }
   // экранные кнопки — только в геймплее (игра, пауза, финишный выход)
   touchEl.classList.toggle('show', G.state==='play' || G.state==='pause' || G.state==='clear' || G.state==='arena');
   // полный экран игра сама не выключает НИКОГДА — включается тапом по экрану
@@ -4451,7 +4455,7 @@ window.__G = { G, P, getL: () => L, parseLevel, startCard, beginPlay,
                arenaBtnRetryRect, arenaBtnResumeRect, arenaBtnMenuRect, arenaBoxRect,
                NET, netHost, netJoin, netClose, netCfg, netKeyOk, arnPanelRect, arnBtnRect, arnCancelRect,
                arnBackRect, arenaXRect, netJoinShow, netJoinHide, HAVE_SUPA,
-               ARENA_PLATS, ARENA_PORTALS: ARN_PORTALS };
+               ARENA_PLATS, ARENA_PORTALS: ARN_PORTALS, note };
 
 /* DEV: index.html?level=N — сразу играть на уровне N (нумерация с 1).
    Используется кнопкой «Играть» в редакторе карт (map/editor.html). */
