@@ -2807,7 +2807,8 @@ const NET_ICE = { iceServers: [        // STUN-помощники для пря�
 const NET_Q = (function () {           // для тестов: ?sburl=адрес&sbkey=ключ — вместо файла
   try {
     const q = new URLSearchParams(location.search);
-    if (q.get('sburl')) return { url:q.get('sburl'), key:q.get('sbkey') || 'local' };
+    if (q.get('sburl')) return { url:q.get('sburl'), key:q.get('sbkey') || 'local',
+                                 dburl:q.get('dburl') || '' };   // dburl — база тестов (обычно не задан)
   } catch (e) {}
   return null;
 })();
@@ -2944,7 +2945,7 @@ function netSbMsg(role, m) {           // сигнальные сообщени�
 function netDbReq(method, table, body, qs) {  // сохранение партии в Postgres; нет таблиц — тихо пропускаем
   const c = netCfg();
   try {
-    return fetch(c.url + '/rest/v1/' + table + (qs ? '?' + qs : ''), {
+    return fetch((c.dburl || c.url) + '/rest/v1/' + table + (qs ? '?' + qs : ''), {
       method,
       headers: { apikey: c.key, Authorization: 'Bearer ' + c.key,
                  'Content-Type': 'application/json', Prefer: 'return=minimal' },
@@ -3021,8 +3022,9 @@ function netHost() {                  // «ИГРАТЬ ВДВОЁМ ПО СЕТ
   for (let i = 0; i < 4; i++) s += A[Math.floor(Math.random()*A.length)];
   NET.code = s; NET.wait = true; NET.dial = 'host';
   netSbChan('host');
-  netDbReq('POST', 'rooms', { code: s, status: 'lobby' })   // схема — supabase-schema.sql;
-    .then(r => { NET.dbOk = !!(r && r.ok); });              // нет таблиц — играем без сохранений
+  if (NET.dbOk !== false)                                   // таблиц нет (404) — больше не пишем:
+    netDbReq('POST', 'rooms', { code: s, status: 'lobby' })   // один запрос на сессию, не спамим
+      .then(r => { NET.dbOk = !!(r && r.ok); });              // нет таблиц — играем без сохранений
 }
 function netJoin(codeRaw) {
   if (!HAVE_SUPA) { Sfx.bump(); note('СЕТЬ НЕДОСТУПНА — НУЖЕН ИНТЕРНЕТ', 3); return; }
@@ -3110,15 +3112,18 @@ function netData(role, d) {
       }
     } else if (d.t === 'R' && ARN.over) {        // гость просит новый забег
       arenaStart(); netSend({ t:'RS' });
-    } else if (d.t === 'Q') netSend({ t:'P', ts:d.ts });
+    } else if (d.t === 'PK' && NET.on) arenaPk(); // напарник прыгнул на голову
+    else if (d.t === 'Q') netSend({ t:'P', ts:d.ts });
   } else {
     if (d.t === 'W') {                // хост подтвердил старт
       NET.on = true; NET.mode = 'guest'; NET.lastWv = 0;
       arenaStart();
+      L.enemies.length = 0;           // свой спавн волны 1 не нужен: враги — зеркала хоста
       P.x = 264;                      // чуть правее хоста, чтобы не слипались
     } else if (d.t === 'RS') {
-      ARN.over = false; arenaStart(); P.x = 264;
+      ARN.over = false; arenaStart(); L.enemies.length = 0; P.x = 264;
     } else if (d.t === 'S' && NET.on) netSnap(d);
+    else if (d.t === 'PK' && NET.on) arenaPk(); // хост прыгнул на голову
     else if (d.t === 'P' && !d.tg) netSend({ t:'Q', ts:d.ts, tg:1 });
     else if (d.t === 'Q' && !d.tg) netSend({ t:'P', ts:d.ts, tg:1 });
     /* тег tg: два гостя в одной комнате не должны зациклить пинг-понг
@@ -3165,6 +3170,35 @@ function arenaContactMirror(m) {      // у гостя: то же касание
     L.floats.push({x:m.x, y:m.y-8, txt:'200', t:0});
     m.dead = 'squish'; NET.ev.st.push(m.id);
   } else arenaHurt();
+}
+function arenaPvpCheck() {            // прыжок на голову НАПАРНИКА — PvP-убийство
+  if (!NET.on || ARN.over || ARN.paused || P.dying || ARN.hearts <= 0) return;
+  const r = NET.rp;
+  // хост видит гостя в сглаженных rx/ry, гость хоста — в снимке x/y
+  const vx = NET.mode === 'host' ? r.rx : r.x, vy = NET.mode === 'host' ? r.ry : r.y;
+  if (r.hp <= 0 || r.inv > 0) return;  // выбывшего или неуязвимого убить нельзя
+  const vic = { x:vx, y:vy, w:P.w, h:P.h };
+  if (!aabb(playerRect(), vic)) return;
+  if (!(P.vy > 40 && (P.y + P.h) - vic.y < 12)) return;   // топтание, как у врагов
+  P.vy = Keys.jump ? -CFG.STOMPV - 60 : -CFG.STOMPV; P.squash = 0.14;
+  Sfx.stomp(); puff(vic.x+5, vic.y+2, 6, 60);
+  Bank.earn(120);                      // награда за PvP — ровно 120 монет в копилку
+  L.floats.push({x:vic.x-4, y:vic.y-8, txt:'+120', t:0});
+  note('НАПАРНИК РАЗДАВЛЕН — +120 МОНЕТ!', 2.2);
+  netSend({ t:'PK' });                 // жертве: мгновенное поражение до волны
+}
+function arenaPk() {                  // жертва PvP: все сердца прочь, лежим до волны
+  if (!NET.on || ARN.over || P.dying || ARN.hearts <= 0) return;
+  ARN.hearts = 0; P.inv = 0; P.vy = -160; P.squash = 0.2;
+  Sfx.hurt(); shake(3, 0.3);
+  note('ТЕБЯ РАЗДАВИЛ НАПАРНИК! ЛЕЖИШЬ ДО ВОЛНЫ', 2.5);
+  for (let i=0;i<10;i++) L.parts.push({x:P.x+5, y:P.y+7, vx:Math.cos(i/10*6.283)*110,
+    vy:Math.sin(i/10*6.283)*110, t:0, life:0.5, col:'spark', s:2, grav:0.3});
+  const allyAlive = NET.rp.hp > 0;     // выбыл и напарник — честный финал забега
+  if (!allyAlive) {
+    ARN.over = true; ARN.overT = 0;
+    Sfx.stopMusic(); Sfx.gameover(); Bank.flush(); arenaSaveBest();
+  }
 }
 function netGuestTick(dt) {           // гость: анимация зеркал + пакет своего состояния
   NET.snapAge += dt;
@@ -3316,6 +3350,7 @@ function updateArena(dt, ce) {
   }
   // на узких экранах (вид уже 512) камера чуть едет за героем
   ARN.camX = CFG.VW >= 512 ? 0 : clamp(P.x + 5 - CFG.VW/2, 0, 512 - CFG.VW);
+  if (NET.on) arenaPvpCheck();         // PvP: прыжок на голову напарника
   if (NET.on) netHostTick(dt);         // снимки состояния для гостя + пинг
 }
 function updateArenaGuest(dt) {        // гость: свой герой/монеты/трубы локально,
@@ -3356,8 +3391,10 @@ function updateArenaGuest(dt) {        // гость: свой герой/мон
       break;
     }
   }
-  if (ARN.hearts > 0)                  // выбывшего враги не трогают
+  if (ARN.hearts > 0) {                // выбывшего враги не трогают,
+    arenaPvpCheck();                   // а напарник может прыгнуть на голову
     for (const m of NET.mirror.values()) arenaContactMirror(m);
+  }
   ARN.camX = CFG.VW >= 512 ? 0 : clamp(P.x + 5 - CFG.VW/2, 0, 512 - CFG.VW);
   netGuestTick(dt);
 }
@@ -3469,7 +3506,8 @@ function renderArena() {
     for (let bx = pl.x + 14; bx < pl.x + pl.w - 8; bx += 32) cv2.fillRect(bx - camX, pl.y + 4, 2, 2);
   }
   for (const a of L.amb) { cv2.fillStyle = a.col; cv2.fillRect(a.x - camX, a.y, 3, 3); }
-  for (const e of L.enemies) drawEnemy(e);
+  if (!(NET.on && NET.mode === 'guest'))  // гость: свой спавн волны 1 замёрз (своей
+    for (const e of L.enemies) drawEnemy(e); // симуляции нет) — рисуем ТОЛЬКО зеркала хоста
   if (NET.on && NET.mode === 'guest')  // у гостя враги — зеркала из снимков хоста
     for (const m of NET.mirror.values()) drawEnemy(m);
   drawPlayer();
@@ -3540,7 +3578,7 @@ function renderArenaMenu() {
     txt('другой игрок выбирает «ВОЙТИ ПО КОДУ» и вводит его', CFG.VW/2, p.y + 150, 8, 'rgba(255,255,255,.55)', 'center');
   } else {
     txt('РЕЖИМ «АРЕНА»', CFG.VW/2, p.y + 14, 13, '#ffd800', 'center');
-    txt('пакман-выживание: монеты, трубы, волны', CFG.VW/2, p.y + 32, 8, 'rgba(255,255,255,.7)', 'center');
+    txt('монеты · трубы · волны · прыжок на голову напарника = +120 монет', CFG.VW/2, p.y + 32, 8, 'rgba(255,255,255,.7)', 'center');
     drawArenaBtn(arnBtnRect(0), 'ОДИН ИГРОК');
     drawArenaBtn(arnBtnRect(1), 'ИГРАТЬ ВДВОЁМ ПО СЕТИ');
     drawArenaBtn(arnBtnRect(2), 'ВОЙТИ ПО КОДУ КОМНАТЫ');
@@ -4453,7 +4491,7 @@ window.__G = { G, P, getL: () => L, parseLevel, startCard, beginPlay,
                aboutPanelRect, aboutChRect, aboutPlanRect, supBtnRect, aboutCloseRect, SEL_BACK,
                ARN, arenaStart, arenaExit, arenaBest, arenaHurt, arenaWave,
                arenaBtnRetryRect, arenaBtnResumeRect, arenaBtnMenuRect, arenaBoxRect,
-               NET, netHost, netJoin, netClose, netCfg, netKeyOk, arnPanelRect, arnBtnRect, arnCancelRect,
+               NET, netHost, netJoin, netClose, netCfg, netKeyOk, netDbGame, arnPanelRect, arnBtnRect, arnCancelRect,
                arnBackRect, arenaXRect, netJoinShow, netJoinHide, HAVE_SUPA,
                ARENA_PLATS, ARENA_PORTALS: ARN_PORTALS, note };
 
