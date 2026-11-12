@@ -2808,15 +2808,20 @@ const NET_Q = (function () {           // для тестов: ?sburl=адрес
   try {
     const q = new URLSearchParams(location.search);
     if (q.get('sburl')) return { url:q.get('sburl'), key:q.get('sbkey') || 'local',
-                                 dburl:q.get('dburl') || '' };   // dburl — база тестов (обычно не задан)
+                                 dburl:q.get('dburl') || '', db:q.get('db') };
   } catch (e) {}
   return null;
 })();
 function netCfg() {                    // конфиг Supabase: URL-параметры важнее файла
   if (NET_Q) return NET_Q;
-  try { const c = window.SUPABASE_CFG || {}; return { url:c.url || '', key:c.key || '' }; }
+  try { const c = window.SUPABASE_CFG || {}; return { url:c.url || '', key:c.key || '',
+         dburl:c.dburl || '', db:c.db ? '1' : '' }; }
   catch (e) { return { url:'', key:'' }; }
 }
+function netDbEnabled() {              // сохранения в Postgres включены? (db:true в конфиге или ?db=1)
+  if (NET_Q) return NET_Q.db === '1';  // по умолчанию ВЫКЛЮЧЕНЫ: таблиц может не быть,
+  try { return (window.SUPABASE_CFG || {}).db === true; } catch (e) { return false; }
+}                                      // а лишних 404 в консоли у релиза быть не должно
 function netKeyOk() {                  // anon-ключ ещё не вставлен в supabase-config.js?
   const c = netCfg();
   return !!(c.url && c.key && !/ВСТАВЬ|PASTE|YOUR-|HERE|XXXX/i.test(c.key));
@@ -3022,9 +3027,9 @@ function netHost() {                  // «ИГРАТЬ ВДВОЁМ ПО СЕТ
   for (let i = 0; i < 4; i++) s += A[Math.floor(Math.random()*A.length)];
   NET.code = s; NET.wait = true; NET.dial = 'host';
   netSbChan('host');
-  if (NET.dbOk !== false)                                   // таблиц нет (404) — больше не пишем:
-    netDbReq('POST', 'rooms', { code: s, status: 'lobby' })   // один запрос на сессию, не спамим
-      .then(r => { NET.dbOk = !!(r && r.ok); });              // нет таблиц — играем без сохранений
+  if (netDbEnabled() && NET.dbOk !== false)                 // сохранения — ТОЛЬКО при db:true/?db=1:
+    netDbReq('POST', 'rooms', { code: s, status: 'lobby' })   // по умолчанию в /rest/v1 не ходим вовсе
+      .then(r => { NET.dbOk = !!(r && r.ok); });              // (нет таблиц — нет и 404 в консоли)
 }
 function netJoin(codeRaw) {
   if (!HAVE_SUPA) { Sfx.bump(); note('СЕТЬ НЕДОСТУПНА — НУЖЕН ИНТЕРНЕТ', 3); return; }
