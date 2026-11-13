@@ -78,3 +78,18 @@ create policy "moves public play" on public.game_moves
 -- Примечание: Broadcast и Presence таблиц НЕ требуют — канал 'bob5a-КОД'
 -- создаётся на лету, игровые данные после рукопожатия идут по прямому
 -- WebRTC мимо сервера. Скрипт достаточно выполнить один раз.
+
+-- ----------------------------------------------------------------------------
+-- ДОПОЛНЕНИЕ (железные комнаты): updated_at обновляется сам при любом PATCH —
+-- по нему видно, что хост жив (лобби хоста шлёт heartbeat PATCH каждые 8 с).
+-- ----------------------------------------------------------------------------
+create or replace function public.rooms_touch() returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists rooms_touch_trg on public.rooms;
+create trigger rooms_touch_trg before update on public.rooms
+  for each row execute function public.rooms_touch();

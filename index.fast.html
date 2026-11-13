@@ -3104,14 +3104,23 @@ function arenaContact(e) {             // касание врага: прыжо�
   } else arenaHurt();
 }
 
-/* ---------- СЕТЬ АРЕНЫ: кооп на двоих через Supabase (WebRTC, P2P) ----------
+/* ---------- СЕТЬ АРЕНЫ: кооп на двоих через Supabase ----------
    Знакомит игроков сигнальный сервер Supabase Realtime (адрес проекта и
-   ПУБЛИЧНЫЙ anon-ключ — в файле supabase-config.js рядом с игрой; ключ
-   открытый по дизайну, пароль базы данных в игру не встраивается никогда).
-   Как только игроки познакомились — ход данных прямой P2P через WebRTC,
-   сервер больше не участвует. Отключение сети не ломает игру: Supabase не
-   загрузился — сетевые кнопки честно пишут «сеть недоступна». Комната =
-   4-символьный код; третьему игроку хост вежливо отвечает «КОМНАТА ЗАНЯТА». */
+   ПУБЛИЧНЫЙ ключ — в supabase-config.js; ключ открытый по дизайну, пароль
+   базы данных в игру не встраивается никогда).
+   КАНАЛ = комната «bob5a-КОД», в ней три эшелона:
+     1) presence  — «кто сейчас в комнате» (счётчик игроков в лобби);
+     2) broadcast — знакомство: JOIN, OFFER, ANSWER, ICE, FULL, RHELLO/RACK;
+     3) P2P WebRTC — игровые данные 60 Гц; если прямое соединение не
+        открылось (сотовые операторы и строгие NAT часто режут P2P) —
+        АВТОМАТИЧЕСКИ включается запасной путь: те же игровые пакеты ходят
+        через broadcast-канал Supabase (релей, ~12 пакетов/с) — игра идёт
+        всегда, просто чуть более плавная у одного и чуть менее у другого.
+   Честные сообщения вместо «комната не найдена»: код проверяется и по
+   presence (хост онлайн?), и по таблице rooms (если схемы развёрнуты).
+   Отключение сети не ломает игру: Supabase не загрузился — сетевые кнопки
+   честно пишут «сеть недоступна». Комната = 4-символьный код; третьему
+   игроку хост вежливо отвечает «КОМНАТА ЗАНЯТА». */
 const HAVE_SUPA = typeof supabase !== 'undefined';
 const NET_ICE = { iceServers: [        // STUN-помощники для прямого P2P-канала
   { urls:'stun:stun.l.google.com:19302' },
@@ -3132,9 +3141,9 @@ function netCfg() {                    // конфиг Supabase: URL-парам�
   catch (e) { return { url:'', key:'' }; }
 }
 function netDbEnabled() {              // сохранения в Postgres включены? (db:true в конфиге или ?db=1)
-  if (NET_Q) return NET_Q.db === '1';  // по умолчанию ВЫКЛЮЧЕНЫ: таблиц может не быть,
+  if (NET_Q) return NET_Q.db === '1';  // без таблиц игра работает на presence: деградации нет
   try { return (window.SUPABASE_CFG || {}).db === true; } catch (e) { return false; }
-}                                      // а лишних 404 в консоли у релиза быть не должно
+}
 function netKeyOk() {                  // anon-ключ ещё не вставлен в supabase-config.js?
   const c = netCfg();
   return !!(c.url && c.key && !/ВСТАВЬ|PASTE|YOUR-|HERE|XXXX/i.test(c.key));
@@ -3155,25 +3164,28 @@ const NET = {
   wait:false, entering:false,         // лобби: ждём игрока / вводим код
   dial:null, full:false,              // идёт подключение / комната занята (уже двое)
   rtt:0, tPing:1.5, snapT:0, snapAge:0, lastWv:0, ckChanged:false,
+  sendHz:0, snapHz:30, tSend:0,       // релей снижает частоту пакетов (лимит канала)
+  testFast:false,                     // только для автотестов: ускоряет таймеры в 10 раз
   rp:{ x:240, y:242, px:240, py:242, vx:0, vy:0, face:1, animT:0, grounded:true,
        inv:0, hp:3, rx:240, ry:242 }, // удалённый игрок (гость у хоста / хост у гостя)
   mirror:new Map(),                   // зеркала врагов у гостя: id → {x,y,px,py,...}
   ev:{ st:[], cc:[] }                 // события гостя за кадр: стомпы и монеты
 };
+const SB_WD = 25000;                   // сторож гостя: хост так и не открылся, мс
+const TSC = NET.testFast ? 0.1 : 1;    // масштаб таймеров (автотесты ×10 быстрее)
 /* Схема БЕЗ ЛАГОВ: каждый игрок симулирует СВОЕГО героя локально (нулевая
    задержка ввода), хост авторитетен для врагов/волн/счёта. Гость шлёт своё
-   состояние 60 раз/с, хост отвечает снимками 30 раз/с — на чужую половину
-   экрана накатывается линейная интерполяция, поэтому всё выглядит плавно. */
+   состояние 60 раз/с (по P2P) или 12 раз/с (по релею), хост отвечает
+   снимками 30 или 10 раз/с — на чужую половину экрана накатывается
+   линейная интерполяция, поэтому всё выглядит плавно на любом пути. */
 /* ---------- сигналинг Supabase Realtime: канал = комната «bob5a-КОД» ----------
-   Сообщения канала (event 'g') — только знакомство: JOIN, OFFER, ANSWER, ICE,
-   FULL. Игровые данные (60 Гц) по ним НЕ ходят: после рукопожатия открывается
-   прямой data-канал WebRTC, и сервер больше не участвует. Поля fr (кто) и
+   Сообщения канала (event 'g'): знакомство JOIN/OFFER/ANSWER/ICE/FULL,
+   релей-рукопожатие RHELLO/RACK и игровые пакеты релея RD. Поля fr (кто) и
    to (кому) — адресация: чужие сообщения молча игнорируются. */
-NET.sb = null;                         // { chan, role, me, pcs, t, wd }
-const SB_WD = 12000;                   // сторож сигналинга: хост не объявился, мс
+NET.sb = null;                         // { chan, role, me, pcs, t, wd, ff, rh, rh0, hb, hw, pres, peer, guestKey }
 function netDcWire(dc, role) {         // data-канал WebRTC → обёртка под netWire/netSend
   const ls = {};
-  const c = { open:false,
+  const c = { kind:'dc', open:false,
     on(ev, cb) { (ls[ev] = ls[ev] || []).push(cb); },
     emit(ev, ...a) { (ls[ev] || []).forEach(cb => { try { cb(...a); } catch (e) {} }); } };
   dc.onopen = () => { c.open = true; c.emit('open'); };
@@ -3185,9 +3197,22 @@ function netDcWire(dc, role) {         // data-канал WebRTC → обёрт�
   c.close = () => { try { dc.close(); } catch (e) {} };
   return c;
 }
+function netRelayWire() {              // запасной канал: те же пакеты через Supabase
+  const ls = {};
+  const c = { kind:'relay', open:true,
+    on(ev, cb) { (ls[ev] = ls[ev] || []).push(cb); },
+    emit(ev, ...a) { (ls[ev] || []).forEach(cb => { try { cb(...a); } catch (e) {} }); } };
+  c.send = o => { try { if (NET.sb && NET.sb.peer)
+    NET.sb.chan.send({ type:'broadcast', event:'g',
+      payload:{ to:NET.sb.peer, fr:NET.sb.me, t:'RD', d:o } }); } catch (e) {} };
+  c.close = () => { c.open = false; };
+  return c;
+}
 function netSbStop() {                 // гасим сигнальный канал и незавершённые рукопожатия
   if (NET.sb) {
     clearInterval(NET.sb.t); clearTimeout(NET.sb.wd); clearTimeout(NET.sb.ff);
+    clearInterval(NET.sb.rh); clearTimeout(NET.sb.rh0);
+    clearInterval(NET.sb.hb); clearInterval(NET.sb.hw);
     try { for (const [, pc] of NET.sb.pcs) { try { pc.close(); } catch (e) {} } } catch (e) {}
     try { NET.sb.chan.unsubscribe(); } catch (e) {}
   }
@@ -3199,40 +3224,80 @@ function netSbTo(pid, o) {             // адресный бродкаст: ч�
 }
 function netSbPc(pid) {                // WebRTC-пир: ICE-кандидаты летят через канал
   const pc = new RTCPeerConnection(NET_ICE);
+  pc._born = Date.now();
   NET.sb.pcs.set(pid, pc);
   pc.onicecandidate = ev => { if (ev.candidate) netSbTo(pid, { t:'ICE', c:ev.candidate.toJSON() }); };
   return pc;
 }
-function netSbClaim(c) {               // data-канал открыт: дальше — чистый P2P
-  if (!NET.sb || NET.conn) return;
+function netSbClaim(w, peer) {         // канал открыт (P2P или релей): дальше — игра
+  if (!NET.sb) { if (w.kind === 'dc') w.close(); return false; }
+  if (NET.conn) {                      // первый канал побеждает, лишний закрываем
+    if (w.kind === 'dc') w.close();
+    return false;
+  }
   clearInterval(NET.sb.t); clearTimeout(NET.sb.wd); clearTimeout(NET.sb.ff);
-  NET.conn = c; netWire(c, NET.sb.role);
-  NET.dial = null;
+  clearInterval(NET.sb.rh); clearTimeout(NET.sb.rh0);
+  clearInterval(NET.sb.hb); clearInterval(NET.sb.hw);
+  NET.sb.peer = peer || NET.sb.peer || '';
+  NET.conn = w; NET.dial = null;
+  NET.sendHz = w.kind === 'relay' ? 12 : 0;   // 0 = каждый кадр (P2P, 60 Гц)
+  NET.snapHz = w.kind === 'relay' ? 10 : 30;
+  netWire(w, NET.sb.role);
+  if (w.kind === 'relay') w.emit('open');   // релей уже «открыт»: рукопожатие H/W стартует сразу
   if (NET.sb.role === 'host' && NET.dbOk === true)   // в Postgres: комната в игре
     netDbReq('PATCH', 'rooms', { status: 'playing' }, 'code=eq.' + NET.code);
+  return true;
 }
-function netSbFail(role, noServer) {   // сигналинг недоступен / хост не объявился
+function netSbFail(role, why) {        // честный итог ожидания: почему не вышло
   netSbStop();
-  if (NET.dial !== (role === 'host' ? 'host' : 'join')) return;
+  const dial = role === 'host' ? 'host' : 'join';
+  if (NET.dial !== dial) return;
   NET.dial = null; NET.wait = false;
-  note(noServer ? 'СЕТЬ НЕДОСТУПНА — НУЖЕН ИНТЕРНЕТ'
-       : 'КОМНАТА ' + NET.code + ' НЕ НАЙДЕНА — ПРОВЕРЬ КОД', 4);
+  if (why === 'server') note('СЕТЬ НЕДОСТУПНА — НУЖЕН ИНТЕРНЕТ', 4);
+  else if (why === 'hostsilent') note('ХОСТ НЕ ОТВЕЧАЕТ — ПОПРОБУЙ ВОЙТИ ЕЩЁ РАЗ', 4);
+  else note('КОМНАТА ' + NET.code + ' НЕ НАЙДЕНА — ПРОВЕРЬ КОД', 4);
 }
 function netSbMsg(role, m) {           // сигнальные сообщения канала (не игровые)
   if (!NET.sb || !m || !m.t || m.fr === NET.sb.me) return;
   /* to='host' — сообщение любому хосту в комнате, остальное строго адресно */
   if (m.to && m.to !== NET.sb.me && !(role === 'host' && m.to === 'host')) return;
   const sb = NET.sb;
+  if (m.t === 'RD') {                  // игровые пакеты релея — только своему пиру
+    if (NET.conn && NET.conn.kind === 'relay' && m.fr === sb.peer &&
+        NET.conn.open && (m.to === sb.me || (role === 'host' && m.to === 'host')))
+      NET.conn.emit('data', m.d);
+    return;
+  }
+  if (m.t === 'RHELLO') {              // напарник просит релей: P2P у него не открылся
+    if (NET.conn || NET.on) return;    // связь уже есть — P2P победил
+    if (sb.peer && sb.peer !== m.fr) { netSbTo(m.fr, { t:'FULL' }); return; }
+    sb.peer = m.fr;
+    netSbTo(m.fr, { t:'RACK' });
+    netSbClaim(netRelayWire(), m.fr);
+    return;
+  }
+  if (m.t === 'RACK') {                // хост согласился на релей
+    if (NET.conn || NET.on || m.to !== sb.me) return;
+    sb.peer = m.fr;
+    netSbClaim(netRelayWire(), m.fr);
+    return;
+  }
   if (role === 'host') {
     if (m.t === 'JOIN') {
       if (NET.conn || NET.on) { netSbTo(m.fr, { t:'FULL' }); return; }   // уже двое
-      if (sb.pcs.has(m.fr)) return;                                      // повтор JOIN
+      const ex = sb.pcs.get(m.fr);     // застрявшее рукопожатие старше 6 с — пересоздаём
+      if (ex) {
+        if (Date.now() - ex._born < 6000) return;
+        try { ex.close(); } catch (e) {}
+        sb.pcs.delete(m.fr);
+      }
       const pc = netSbPc(m.fr);
       const dc = pc.createDataChannel('g', { ordered:true });
       const w = netDcWire(dc, 'host');
-      w.on('open', () => netSbClaim(w));
+      const fr = m.fr;
+      w.on('open', () => netSbClaim(w, fr));
       pc.createOffer().then(o => pc.setLocalDescription(o)).then(() =>
-        netSbTo(m.fr, { t:'OFFER', sdp: pc.localDescription.sdp })).catch(() => {});
+        netSbTo(fr, { t:'OFFER', sdp: pc.localDescription.sdp })).catch(() => {});
     } else if (m.t === 'ANSWER' && sb.pcs.has(m.fr)) {
       try { sb.pcs.get(m.fr).setRemoteDescription({ type:'answer', sdp:m.sdp }); } catch (e) {}
     } else if (m.t === 'ICE' && sb.pcs.has(m.fr) && m.c) {
@@ -3244,11 +3309,17 @@ function netSbMsg(role, m) {           // сигнальные сообщени�
       if (NET.dial === 'join') { NET.dial = null; note('КОМНАТА ЗАНЯТА — УЖЕ ДВОЕ', 3); }
       return;
     }
-    if (m.t === 'OFFER' && NET.dial === 'join' && !NET.conn && !sb.pcs.has(m.fr)) {
+    if (m.t === 'OFFER' && NET.dial === 'join' && !NET.conn) {
+      const ex = sb.pcs.get(m.fr);     // старый мёртвый пир не держим: хост прислал новый OFFER
+      if (ex && Date.now() - ex._born > 6000) {
+        try { ex.close(); } catch (e) {}
+        sb.pcs.delete(m.fr);
+      }
+      if (sb.pcs.has(m.fr)) return;
       const pc = netSbPc(m.fr);
       pc.ondatachannel = ev => {                      // канал данных от хоста
         const w = netDcWire(ev.channel, 'guest');
-        netSbClaim(w);
+        netSbClaim(w, m.fr);
         if (ev.channel.readyState === 'open') { w.open = true; w.emit('open'); }
       };
       pc.setRemoteDescription({ type:'offer', sdp:m.sdp })
@@ -3271,6 +3342,27 @@ function netDbReq(method, table, body, qs) {  // сохранение парти
     }).catch(() => null);
   } catch (e) { return Promise.resolve(null); }
 }
+function netDbRoomCheck() {            // быстрый честный ответ: код есть в rooms? (если таблицы есть)
+  if (!netDbEnabled() || NET.dbOk === false) return;
+  const c = netCfg();
+  try {
+    fetch((c.dburl || c.url) + '/rest/v1/rooms?code=eq.' + NET.code + '&select=code', {
+      headers: { apikey: c.key, Authorization: 'Bearer ' + c.key } })
+      .then(r => {
+        if (NET.dbOk === undefined) NET.dbOk = (r.status !== 404);  // 404 — таблиц нет: без базы
+        return r.ok ? r.json() : null;
+      })
+      .then(rows => {
+        if (!rows || NET.conn || NET.on || NET.dial !== 'join') return;
+        if (!rows.length) {                       // таблица есть, комнаты нет — мгновенный отказ
+          NET.dbOk = true; netSbStop();
+          NET.dial = null; NET.wait = false;
+          note('КОМНАТА ' + NET.code + ' НЕ НАЙДЕНА — ПРОВЕРЬ КОД', 4);
+        } else NET.dbOk = true;
+      })
+      .catch(() => {});
+  } catch (e) {}
+}
 function netDbGame() {                // итог забега пишет хост (схема — supabase-schema.sql)
   if (!NET.on || NET.mode !== 'host' || NET.dbOk !== true) return;
   netDbReq('POST', 'games', { code: NET.code, wave: ARN.wave, score: ARN.score });
@@ -3282,25 +3374,28 @@ function netSbChan(role) {             // открыть канал-комнат
     chan = netClient().channel('bob5a-' + NET.code,
       { config: { broadcast: { self:false }, presence: { key: meKey } } });
   } catch (e) { netSbFail(role, true); return; }
-  NET.sb = { chan, role, me:meKey, pcs:new Map(), t:0, wd:0, ff:0, pres:null };
+  NET.sb = { chan, role, me:meKey, pcs:new Map(), t:0, wd:0, ff:0, rh:0, rh0:0,
+             hb:0, hw:0, pres:null, peer:'', guestKey:'' };
   chan.on('broadcast', { event:'g' }, ({ payload }) => netSbMsg(role, payload || {}));
   chan.on('presence', { event:'sync' }, () => {      // кто сейчас онлайн в комнате
     if (!NET.sb || NET.sb.chan !== chan) return;
-    let host = 0, total = 0;
+    let host = 0, total = 0, gk = '';
     try {
       const st = chan.presenceState();
       for (const k of Object.keys(st)) for (const meta of st[k]) {
         total++; if (meta && meta.role === 'host') host++;
+        else if (meta && meta.role === 'guest' && !gk) gk = k;
       }
     } catch (e) {}
     NET.sb.pres = { host, total };
+    if (gk) NET.sb.guestKey = gk;
   });
   chan.subscribe(status => {
     const dial = role === 'host' ? 'host' : 'join';   // роль ≠ dial: гость «join»
     if (!NET.sb || NET.sb.chan !== chan) return;      // канал уже погашен
     if (status !== 'SUBSCRIBED') {                    // CHANNEL_ERROR / TIMED_OUT
       if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') &&
-          NET.dial === dial && !NET.conn) netSbFail(role, true);
+          NET.dial === dial && !NET.conn) netSbFail(role, 'server');
       return;
     }
     if (NET.dial !== dial) return;                    // игрок уже отменил
@@ -3311,23 +3406,47 @@ function netSbChan(role) {             // открыть канал-комнат
       if (!NET.sb.t) NET.sb.t = setInterval(() => {   // ретраи: одно подключение — один интервал
         if (NET.dial === 'join' && !NET.conn) netSbTo('host', { t:'JOIN', fr:NET.sb.me });
       }, 1800);
-      NET.sb.ff = setTimeout(() => {                  // быстрый отказ: presence жив, а хоста нет
-        if (NET.dial === dial && !NET.conn &&
-            NET.sb.pres && !NET.sb.pres.host) netSbFail(role, false);
-      }, 6000);
-      NET.sb.wd = setTimeout(() => {                  // сторож гостя: хост так и не объявился
-        if (NET.dial === dial && !NET.conn) netSbFail(role, false);
-      }, SB_WD);
+      NET.sb.ff = setTimeout(() => {                  // хоста нет в presence — просто ждём дальше
+        if (NET.dial === 'join' && !NET.conn &&
+            NET.sb.pres && !NET.sb.pres.host) note('ХОСТ ЕЩЁ НЕ В КОМНАТЕ — ЖДЁМ…', 3);
+      }, 6000 * TSC);
+      NET.sb.rh0 = setTimeout(() => {                 // P2P не открылся — переключаемся на релей
+        if (NET.dial === 'join' && !NET.conn) {
+          note('ПРЯМОЕ СОЕДИНЕНИЕ НЕ ВЫШЛО — ИГРАЕМ ЧЕРЕЗ СЕРВЕР', 3);
+          netSbTo('host', { t:'RHELLO' });
+          NET.sb.rh = setInterval(() => {
+            if (NET.dial === 'join' && !NET.conn) netSbTo('host', { t:'RHELLO' });
+          }, 2000);
+        }
+      }, 9000 * TSC);
+      NET.sb.wd = setTimeout(() => {                  // сторож гостя: итог честной попытки
+        if (NET.dial !== 'join' || NET.conn) return;
+        netSbFail('guest', NET.sb.pres && NET.sb.pres.host ? 'hostsilent' : 'nohost');
+      }, SB_WD * TSC);
+      netDbRoomCheck();                               // мгновенная проверка кода по базе
+    } else {
+      /* хост в лобби ждёт БЕЗ ограничений: сокет держат heartbeat-ы realtime-js */
+      NET.sb.hb = setInterval(() => {                 // комната «жива» для базы (updated_at)
+        if (NET.dbOk === true && !NET.on && NET.wait)
+          netDbReq('PATCH', 'rooms', { status:'lobby' }, 'code=eq.' + NET.code);
+      }, 8000 * TSC);
+      let hwN = 0;
+      NET.sb.hw = setInterval(() => {                 // гость в presence, а связи нет — зовём на релей
+        if (NET.conn || NET.on || !NET.wait) { hwN = 0; return; }
+        if (NET.sb.pres && NET.sb.pres.total >= 2 && NET.sb.guestKey) {
+          if (++hwN >= 3) netSbTo(NET.sb.guestKey, { t:'RHELLO' });
+        } else hwN = 0;
+      }, 5000 * TSC);
     }
-    /* хост в лобби ждёт БЕЗ ограничений: сокет держат heartbeat-ы realtime-js,
-       при обрыве он переподключается сам и подписка придёт сюда снова */
   });
 }
 function netClose() {
+  clearInterval(NET.helloT);
   try { if (NET.conn) NET.conn.close(); } catch (e) {}
   netSbStop();
   NET.on = false; NET.mode = null; NET.conn = null; NET.code = '';
   NET.wait = false; NET.dial = null; NET.full = false;
+  NET.sendHz = 0; NET.snapHz = 30; NET.tSend = 0;
   NET.mirror.clear(); NET.lastWv = 0; NET.rp.hp = 3;
   NET.rp.rx = 240; NET.rp.ry = 242;
 }
@@ -3340,9 +3459,9 @@ function netHost() {                  // «ИГРАТЬ ВДВОЁМ ПО СЕТ
   for (let i = 0; i < 4; i++) s += A[Math.floor(Math.random()*A.length)];
   NET.code = s; NET.wait = true; NET.dial = 'host';
   netSbChan('host');
-  if (netDbEnabled() && NET.dbOk !== false)                 // сохранения — ТОЛЬКО при db:true/?db=1:
-    netDbReq('POST', 'rooms', { code: s, status: 'lobby' })   // по умолчанию в /rest/v1 не ходим вовсе
-      .then(r => { NET.dbOk = !!(r && r.ok); });              // (нет таблиц — нет и 404 в консоли)
+  if (netDbEnabled() && NET.dbOk !== false)                 // сохранения — при db:true/?db=1;
+    netDbReq('POST', 'rooms', { code: s, status: 'lobby' })   // нет таблиц — нет и 404 в консоли
+      .then(r => { NET.dbOk = !!(r && r.ok); });
 }
 function netJoin(codeRaw) {
   if (!HAVE_SUPA) { Sfx.bump(); note('СЕТЬ НЕДОСТУПНА — НУЖЕН ИНТЕРНЕТ', 3); return; }
@@ -3386,7 +3505,14 @@ function netJoinHide() {
 })();
 function netWire(conn, role) {
   conn.on('open', () => {
-    if (role === 'guest') conn.send({ t:'H', hp:3 });
+    if (role === 'guest') {           // «я готов» — повторяем, пока хост не подтвердит старт W
+      conn.send({ t:'H', hp:3 });
+      clearInterval(NET.helloT);
+      NET.helloT = setInterval(() => {
+        if (NET.on || !NET.conn || !NET.conn.open) { clearInterval(NET.helloT); return; }
+        conn.send({ t:'H', hp:3 });
+      }, 350);
+    }
   });
   conn.on('data', d => netData(role, d));
   conn.on('close', () => {
@@ -3414,7 +3540,7 @@ function netData(role, d) {
       arenaStart();
       netSend({ t:'W', hp:ARN.hearts });
       note('ИГРОК 2 ПОДКЛЮЧИЛСЯ!', 2.5);
-    } else if (d.t === 'I' && NET.on) {          // состояние гостя (60 Гц) — доверяем и рисуем
+    } else if (d.t === 'I' && NET.on) {          // состояние гостя (60/12 Гц) — доверяем и рисуем
       const g = NET.rp;
       g.x = d.x; g.y = d.y; g.vx = d.vx; g.face = d.f; g.animT = d.a;
       g.grounded = !!d.g; g.inv = d.iv || 0; g.seen = gTime;   // метка живости для таймаута
@@ -3448,7 +3574,7 @@ function netData(role, d) {
        P↔Q между собой — отвечаем на пинг только без тега (от хоста) */
   }
 }
-function netSnap(d) {                 // гость: применяем снимок хоста (30 Гц)
+function netSnap(d) {                 // гость: применяем снимок хоста (30/10 Гц)
   const r = NET.rp;
   r.px = r.x; r.py = r.y;
   r.x = d.p[0]; r.y = d.p[1]; r.vx = d.p[2]; r.face = d.p[3]; r.animT = d.p[4];
@@ -3520,17 +3646,25 @@ function arenaPk() {                  // жертва PvP: все сердца �
 }
 function netGuestTick(dt) {           // гость: анимация зеркал + пакет своего состояния
   NET.snapAge += dt;
-  const k = clamp(NET.snapAge / (1/30), 0, 1.15);   // интерполяция между снимками
+  if (NET.snapAge > 6.5) {            // хост молчит дольше 6.5 с — связь умерла: честный выход
+    netClose(); note('СОЕДИНЕНИЕ ПОТЕРЯНО', 3); arenaExit(); return;
+  }
+  const k = clamp(NET.snapAge * (NET.snapHz || 30) * 1.05, 0, 1.15); // интерполяция между снимками
   for (const [id, m] of NET.mirror) {
     m.t += dt;
     m.ix = lerp(m.px, m.x, Math.min(1, k)); m.iy = lerp(m.py, m.y, Math.min(1, k));
+  }
+  if (NET.sendHz > 0) {               // релей: шлём состояние реже (лимит канала 20 сообщ/с)
+    NET.tSend -= dt;
+    if (NET.tSend > 0) return;
+    NET.tSend = 1 / NET.sendHz;
   }
   netSend({ t:'I', x:Math.round(P.x*10)/10, y:Math.round(P.y*10)/10, vx:Math.round(P.vx*10)/10,
             f:P.face, a:Math.round(P.animT*100)/100, g:P.grounded?1:0, iv:Math.round(P.inv*100)/100,
             hp:ARN.hearts, st:NET.ev.st.length ? NET.ev.st : 0, cc:NET.ev.cc.length ? NET.ev.cc : 0 });
   NET.ev.st.length = 0; NET.ev.cc.length = 0;
 }
-function netHostTick(dt) {            // хост: сглаживание гостя, пинг, снимки 30 Гц
+function netHostTick(dt) {            // хост: сглаживание гостя, пинг, снимки 30/10 Гц
   const g = NET.rp;
   if (!ARN.over && g.seen && gTime - g.seen > 4) {   // тишина от гостя — связь умерла
     netClose(); note('НАПАРНИК ОТКЛЮЧИЛСЯ', 3); return;
@@ -3540,7 +3674,7 @@ function netHostTick(dt) {            // хост: сглаживание гос
   NET.tPing -= dt;
   if (NET.tPing <= 0) { NET.tPing = 2; netSend({ t:'P', ts:Date.now() }); }
   NET.snapT -= dt;
-  if (NET.snapT <= 0) { NET.snapT = 1/30;
+  if (NET.snapT <= 0) { NET.snapT = 1/(NET.snapHz || 30);
     const en = [];
     for (const e of L.enemies)
       en.push([e.id, Math.round(e.x*10)/10, Math.round(e.y*10)/10, e.dir,
@@ -3887,9 +4021,13 @@ function renderArenaMenu() {
     txt(NET.code, CFG.VW/2, p.y + 52, 22, '#ffe98a', 'center');
     const dots = '.'.repeat(1 + (Math.floor(uiTime*2) % 3));
     txt('ОЖИДАНИЕ ИГРОКА ' + dots, CFG.VW/2, p.y + 90, 9, 'rgba(255,255,255,.85)', 'center');
-    if (NET.sb && NET.sb.pres)               // presence: сколько игроков сейчас в комнате
-      txt('в комнате: ' + NET.sb.pres.total + ' из 2' + (NET.sb.pres.total > 1 ? ' — входит…' : ''),
-          CFG.VW/2, p.y + 106, 8, 'rgba(140,255,170,.75)', 'center');
+        if (NET.sb && NET.sb.pres) {             // presence: сколько игроков сейчас в комнате
+      const pr = NET.sb.pres, lnk = NET.conn || NET.on;
+      txt('в комнате: ' + Math.min(pr.total, 2) + ' из 2' +
+          (lnk ? ' — связь есть!' :
+           pr.total > 1 ? ' — налаживаем связь…' : ' — ждём второго…'),
+          CFG.VW/2, p.y + 106, 8, lnk ? 'rgba(140,255,170,.95)' : 'rgba(140,255,170,.75)', 'center');
+    }
     drawArenaBtn(arnCancelRect(), 'ОТМЕНА');
     txt('другой игрок выбирает «ВОЙТИ ПО КОДУ» и вводит его', CFG.VW/2, p.y + 150, 8, 'rgba(255,255,255,.55)', 'center');
   } else {

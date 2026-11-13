@@ -6,6 +6,7 @@
    вставлять НЕЛЬЗЯ — он живёт только на сервере. Пароль базы данных сюда
    и в игру не вписывается — он сети не нужен. */
 window.SUPABASE_CFG = {
+  db: true,   // регистр комнат в Postgres (supabase-schema.sql): честное «комната не найдена»
   url: 'https://haskxauivkflazbhthmt.supabase.co',
   key: 'sb_publishable_WYTOOey1XNYKL_OCMEHrmQ_c2ObdPe3'
 };
