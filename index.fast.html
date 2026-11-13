@@ -3058,6 +3058,12 @@ function arenaWave(n) {                // волна n: монеты занов�
     () => add('shielder', 416, F1, 240, 472, -1)];
   for (let k = 0; k < Math.min(n-1, extras.length) && L.enemies.length < 12; k++) extras[k]();
   P.inv = Math.max(P.inv, 1.2);        // секунда на осмотрение после новой волны
+  if (NET.on && ARN.hearts <= 0) {     // хост-призрак воскресает с новой волной
+    ARN.hearts = 1; note('НОВАЯ ВОЛНА — ТЫ СНОВА В СТРОЮ!', 2.2);
+  }
+  if (NET.on && ARN.hearts <= 0) {     // хост-призрак воскресает с новой волной
+    ARN.hearts = 1; note('НОВАЯ ВОЛНА — ТЫ СНОВА В СТРОЮ!', 2.2);
+  }
   Sfx.music((n-1) % 5);                // своя тональность музыки на каждую волну
 }
 function arenaStart() {
@@ -3119,12 +3125,24 @@ function arenaContact(e) {             // касание врага: прыжо�
         Если прямое соединение не открылось (сотовые операторы и строгие
         NAT часто режут P2P) — АВТОМАТИЧЕСКИ включается запасной путь: те
         же игровые пакеты ходят через broadcast-канал Supabase (релей,
-        гость 15 пак/с + хост 12 снимков/с = 27 пак/с — лимит Free-тарифа
+        гость 15 пак/с + хост 15 снимков/с = 30 пак/с — лимит Free-тарифа
         100 сообщений/с на проект соблюдён с запасом) — игра идёт всегда.
    Частоты: по P2P состояние гостя и снимки хоста 30 Гц + keepalive 0.67 Гц
    по надёжному каналу (страховка от «мёртвого» быстрого канала); пакеты без
    изменений не отправляются вовсе (покой = ноль трафика). События гостя
    (монеты, стомпы) летят ОТДЕЛЬНЫМ надёжным пакетом E — потеря невозможна.
+   ЧЕТЫРЕ КЛАССИЧЕСКИЕ ТЕХНИКИ ПЛАВНОСТИ (методология Claude-Code-Game-
+   Studios: хост-авторитарность, версия-сообщения, ноль аллокаций в петлях):
+     1) Client-Side Prediction — свой герой, монеты и стомпы считаются
+        мгновенно локально; подтверждение летит пакетом фоном;
+     2) Server Reconciliation — счёт берёт max(локальный, снимок хоста),
+        собранная монета не «отбирается», финал снимается, если хост уже
+        перезапустил забег (а при смерти связь НЕ рвётся: дух до волны);
+     3) Entity Interpolation — чужой Боб и зеркала врагов рисуются между
+        снимками (30 Гц P2P / 15 Гц релей) с добором скорости за кадром;
+     4) Lag Compensation — стомп гостя хост засчитывает, «отмотав» врага
+        назад по кольцу истории позиций на полпинга (RTT меряется по P/Q);
+        отмотанный хитбокс щедрый, попадание не теряется из-за задержки.
    Честные сообщения вместо «комната не найдена»: код проверяется и по
    presence (хост онлайн?), и по таблице rooms (если схемы развёрнуты).
    Отключение сети не ломает игру: Supabase не загрузился — сетевые кнопки
@@ -3165,7 +3183,7 @@ function netClient() {
   if (SB) return SB;
   const c = netCfg();
   /* eventsPerSecond — клиентский троттлинг broadcast (30 даёт запас релею:
-     гость 15 + хост 12 = 27 пак/с; серверный лимит Free — 100 пак/с) */
+     гость 15 + хост 15 = 30 пак/с; серверный лимит Free — 100 пак/с) */
   SB = supabase.createClient(c.url, c.key, { realtime: { params: { eventsPerSecond: 30 } } });
   return SB;
 }
@@ -3266,7 +3284,7 @@ function netSbClaim(w, peer) {         // канал открыт (P2P или р
   NET.sb.peer = peer || NET.sb.peer || '';
   NET.conn = w; NET.dial = null;
   NET.sendHz = w.kind === 'relay' ? 15 : 30;  // гость: 15 пак/с в релее, 30 пак/с по P2P
-  NET.snapHz = w.kind === 'relay' ? 12 : 30;
+  NET.snapHz = w.kind === 'relay' ? 15 : 30;
   NET.tSend = 0; NET.tKeep = 0.6;             // первый keepalive вскоре после старта
   NET.lastI = ''; NET.lastS = ''; NET.fast = null;
   netWire(w, NET.sb.role);
@@ -3565,9 +3583,27 @@ function netWire(conn, role) {
   });
 }
 function netGuestEvents(d) {          // события гостя (стомпы/монеты) — пакет E, надёжный канал
-  if (d.st) for (const id of d.st) {  // гость прыгнул врагу на голову
+  if (d.st) for (const id of d.st) {  // гость прыгнул врагу на голову — КОМПЕНСАЦИЯ ЗАДЕРЖКИ
     const e = L.enemies.find(e => e.id === id);
-    if (e && !e.dead) { e.dead = 'squish'; e.t = 0; ARN.score += 200;
+    if (!e || e.dead) continue;       // дубль или неизвестный враг — молча пропускаем
+    /* Backward reconciliation: гость бил по интерполированному зеркалу на
+       СВОЁМ экране, значит враг был «там и тогда» — отматываем его позицию
+       назад по кольцу истории на полпинга + интервал интерполяции */
+    const lag = Math.min(0.6, 0.5 * (NET.rtt / 1000) + 0.07);
+    let hx = e.x, hy = e.y;
+    const h = e._h;
+    if (h && h.n) {                   // запись истории, ближайшая к моменту удара
+      let best = null, bd = 1e9;
+      for (let i = 0; i < h.n; i++) { const s = h.a[i], dd = Math.abs(s.t - (gTime - lag));
+        if (dd < bd) { bd = dd; best = s; } }
+      if (best && bd < 0.4) { hx = best.x; hy = best.y; }
+    }
+    const gp = NET.rp;                // позиция гостя ≈ последняя известная (шлёт её 15-30 Гц)
+    /* щедрый хитбокс: ±12-14 px запаса вокруг отмотанного врага — честное
+       попадание не теряется из-за задержки, а далёкие события отбрасываются */
+    const ok = gp.x + 10 > hx - 12 && gp.x < hx + 14 + 12 &&
+               gp.y + 14 > hy - 14 && gp.y < hy + e.h + 14;
+    if (ok) { e.dead = 'squish'; e.t = 0; ARN.score += 200;
       puff(e.x+7, e.y+e.h-2, 4, 40); L.floats.push({x:e.x, y:e.y-8, txt:'200', t:0}); }
   }
   if (d.cc) for (const ci of d.cc) {  // гость собрал монеты
@@ -3595,7 +3631,10 @@ function netData(role, d) {
     } else if (d.t === 'R' && ARN.over) {        // гость просит новый забег
       arenaStart(); netSend({ t:'RS' });
     } else if (d.t === 'PK' && NET.on) arenaPk(); // напарник прыгнул на голову
-    else if (d.t === 'Q' && !d.tg) netSend({ t:'P', ts:d.ts });
+    else if (d.t === 'Q') {           // эхо гостя: честный RTT для компенсации задержки
+      NET.rtt = Math.max(0, Math.min(999, Date.now() - d.ts));
+      if (!d.tg) netSend({ t:'P', ts:d.ts });   // отвечаем только на «свой» Q — без цикла
+    }
     /* тег tg у Q: эхо-ответ гостя хост не пересылает обратно — иначе
        P↔Q зациклится навсегда (при релее — сотни пакетов/с и лимиты) */
   } else {
@@ -3614,14 +3653,18 @@ function netData(role, d) {
        P↔Q между собой — отвечаем на пинг только без тега (от хоста) */
   }
 }
-function netSnap(d) {                 // гость: применяем снимок хоста (30/10 Гц)
+function netSnap(d) {                 // гость: применяем снимок хоста (30/15 Гц) с примирением
   const r = NET.rp;
   r.px = r.x; r.py = r.y;
   r.x = d.p[0]; r.y = d.p[1]; r.vx = d.p[2]; r.face = d.p[3]; r.animT = d.p[4];
   r.grounded = !!d.p[5]; r.inv = d.p[6]; r.hp = d.p[7];
-  ARN.score = d.sc;
+  r.vy = d.p[8] || 0;                 // скорость по Y — для экстраполяции между снимками
+  ARN.score = Math.max(ARN.score, d.sc);  // примирение счёта: предсказанное не отматывается
   if (typeof d.pi === 'number') NET.rtt = d.pi;
   if (d.ov && !ARN.over) { ARN.over = true; ARN.overT = 0; Sfx.stopMusic(); Bank.flush(); arenaSaveBest(); }
+  if (!d.ov && ARN.over) {            // хост уже перезапустил забег — гость выходит из финала
+    ARN.over = false; ARN.overT = 0;
+  }
   if (d.wv !== NET.lastWv) {          // новая волна — как у хоста
     NET.lastWv = d.wv; ARN.wave = d.wv; ARN.banner = 2.4;
     if (ARN.hearts <= 0) ARN.hearts = 1;         // выбывший возвращается в строй
@@ -3641,8 +3684,9 @@ function netSnap(d) {                 // гость: применяем сним
     if (a[6] && !m.dead) { m.dead = 'squish'; }
   }
   for (const [id, m] of NET.mirror) if (!seen.has(id)) NET.mirror.delete(id);
-  if (d.ck) { const has = new Set(d.ck);                  // полный список снятых монет
-    for (let i = 0; i < L.coins.length; i++) L.coins[i].taken = has.has(i); }
+  if (d.ck) { const has = new Set(d.ck);                  // примирение монет: своя монета не
+    for (let i = 0; i < L.coins.length; i++)              // «отбирается», пока событие в пути
+      L.coins[i].taken = L.coins[i].taken || has.has(i); }
 }
 function arenaContactMirror(m) {      // у гостя: то же касание, но с зеркалом врага
   if (P.dying || m.dead || ARN.over) return;
@@ -3715,10 +3759,17 @@ function netGuestTick(dt) {           // гость: анимация зерка
     NET.ev.st.length = 0; NET.ev.cc.length = 0;
   }
 }
-function netHostTick(dt) {            // хост: сглаживание гостя, пинг, снимки 30/12 Гц
+function netHostTick(dt) {            // хост: сглаживание гостя, пинг, снимки 30/15 Гц
   const g = NET.rp;
   if (!ARN.over && g.seen && gTime - g.seen > 4) {   // тишина от гостя — связь умерла
     netClose(); note('НАПАРНИК ОТКЛЮЧИЛСЯ', 3); return;
+  }
+  for (const e of L.enemies) {        // кольцо истории позиций для КОМПЕНСАЦИИ ЗАДЕРЖКИ:
+    if (e.dead) continue;             // 40 записей ≈ 1.3 с; слоты переиспользуются —
+    const h = e._h || (e._h = { a: new Array(40), n: 0, i: 0 });   // ноль аллокаций в кадре
+    const s = h.a[h.i] || (h.a[h.i] = { t:0, x:0, y:0 });
+    s.t = gTime; s.x = e.x; s.y = e.y;
+    h.i = (h.i + 1) % 40; if (h.n < 40) h.n++;
   }
   const s = Math.min(1, dt*18);
   g.rx += (g.x - g.rx) * s; g.ry += (g.y - g.ry) * s;
@@ -3736,7 +3787,8 @@ function netHostTick(dt) {            // хост: сглаживание гос
              e.state === 'shell' ? 1 : 0, e.dead ? 1 : 0]);
   const msg = { t:'S',
     p:[Math.round(P.x*10)/10, Math.round(P.y*10)/10, Math.round(P.vx*10)/10, P.face,
-       Math.round(P.animT*100)/100, P.grounded?1:0, Math.round(P.inv*100)/100, ARN.hearts],
+       Math.round(P.animT*100)/100, P.grounded?1:0, Math.round(P.inv*100)/100, ARN.hearts,
+       Math.round(P.vy*10)/10],
     en, sc:ARN.score, wv:ARN.wave, ov:ARN.over ? 1 : 0, pi:NET.rtt|0 };
   if (NET.ckChanged || kaDue) {       // монеты: при изменении и полным списком в keepalive
     msg.ck = []; for (let i = 0; i < L.coins.length; i++) if (L.coins[i].taken) msg.ck.push(i);
@@ -3815,6 +3867,28 @@ function updateArena(dt, ce) {
       P.dropT = 0.5; Keys.jumpBuf = 0;
     }
     updatePlayer(dt);                  // та же физика, что в кампании
+    if (P.dying && P.deadT > 1.2) {    // яма/ловушка: связь НЕ рвём — дух до новой волны
+      P.dying = false; P.deadT = 0;
+      ARN.hearts = 0;
+      if (NET.on && NET.rp.hp > 0) {   // напарник жив: ждём следующую волну духом
+        resetPlayer(true); P.inv = 2.5;
+        note('ТЫ ВЫБЫЛ — НОВАЯ ВОЛНА ВЕРНЁТ В СТРОЙ', 2.5);
+      } else {                         // оба выбыли (или соло): честный финал забега
+        ARN.over = true; ARN.overT = 0;
+        Sfx.stopMusic(); Sfx.gameover(); Bank.flush(); arenaSaveBest();
+      }
+    }
+    if (P.dying && P.deadT > 1.2) {    // яма/ловушка: связь НЕ рвём — дух до новой волны
+      P.dying = false; P.deadT = 0;
+      ARN.hearts = 0;
+      if (NET.on && NET.rp.hp > 0) {   // напарник жив: ждём следующую волну духом
+        resetPlayer(true); P.inv = 2.5;
+        note('ТЫ ВЫБЫЛ — НОВАЯ ВОЛНА ВЕРНЁТ В СТРОЙ', 2.5);
+      } else {                         // оба выбыли (или соло): честный финал забега
+        ARN.over = true; ARN.overT = 0;
+        Sfx.stopMusic(); Sfx.gameover(); Bank.flush(); arenaSaveBest();
+      }
+    }
   }
   if (NET.on && NET.mode === 'guest') { updateArenaGuest(dt); return; }
   updateArenaEnemies(dt);
@@ -4022,9 +4096,16 @@ function renderArena() {
     for (const m of NET.mirror.values()) drawEnemy(m);
   drawPlayer();
   if (NET.on) {                        // напарник по коопу — подсвечен бирюзой
-    const r = NET.rp, k = clamp(NET.snapAge / (1/30), 0, 1.15);
-    const gx = NET.mode === 'host' ? r.rx : lerp(r.px, r.x, Math.min(1, k));
-    const gy = NET.mode === 'host' ? r.ry : lerp(r.py, r.y, Math.min(1, k));
+    const r = NET.rp, hz = NET.snapHz || 30;
+    let gx, gy;
+    if (NET.mode === 'host') { gx = r.rx; gy = r.ry; }
+    else {                    // гость: интерполяция между снимками + экстраполяция
+      const k = clamp(NET.snapAge * hz * 1.05, 0, 1.6);   // по скорости хоста (vx/vy)
+      const kk = Math.min(1, k);
+      gx = lerp(r.px, r.x, kk); gy = lerp(r.py, r.y, kk);
+      if (k > 1) { const ex = Math.min(NET.snapAge - 1/hz, 0.18);   // до 180 мс за снимком
+        gx += (r.vx || 0) * ex; gy += (r.vy || 0) * ex; }
+    }
     if (r.hp > 0) drawNetPlayer(gx, gy, r, NET.mode === 'host' ? 'ИГРОК 2' : 'ИГРОК 1');
     else if (!ARN.over) txt('НАПАРНИК ВЫБЫЛ', gx + 5 - camX, gy - 12, 7, 'rgba(255,255,255,.7)', 'center');
   }
@@ -4085,7 +4166,7 @@ function renderArenaMenu() {
     txt(NET.code, CFG.VW/2, p.y + 52, 22, '#ffe98a', 'center');
     const dots = '.'.repeat(1 + (Math.floor(uiTime*2) % 3));
     txt('ОЖИДАНИЕ ИГРОКА ' + dots, CFG.VW/2, p.y + 90, 9, 'rgba(255,255,255,.85)', 'center');
-                        if (NET.sb && NET.sb.pres) {             // presence: сколько игроков сейчас в комнате
+                                if (NET.sb && NET.sb.pres) {             // presence: сколько игроков сейчас в комнате
       const pr = NET.sb.pres, lnk = NET.conn || NET.on;
       txt('в комнате: ' + Math.min(pr.total, 2) + ' из 2' +
           (lnk ? ' — связь есть!' :
