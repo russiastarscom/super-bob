@@ -3102,11 +3102,20 @@ function arenaContact(e) {             // касание врага: прыжо�
    КАНАЛ = комната «bob5a-КОД», в ней три эшелона:
      1) presence  — «кто сейчас в комнате» (счётчик игроков в лобби);
      2) broadcast — знакомство: JOIN, OFFER, ANSWER, ICE, FULL, RHELLO/RACK;
-     3) P2P WebRTC — игровые данные 60 Гц; если прямое соединение не
-        открылось (сотовые операторы и строгие NAT часто режут P2P) —
-        АВТОМАТИЧЕСКИ включается запасной путь: те же игровые пакеты ходят
-        через broadcast-канал Supabase (релей, ~12 пакетов/с) — игра идёт
-        всегда, просто чуть более плавная у одного и чуть менее у другого.
+     3) P2P WebRTC — два data-канала: надёжный «g» (упорядоченный: рукопожа-
+        тие, события монет/стомпов, страховка-keepalive) и БЫСТРЫЙ «f»
+        (unordered, без ретрансмитов: потоки состояний S/I — потерянный
+        пакет не задерживает очередь, следующий его заменяет; классическая
+        оптимизация реал-тайма против head-of-line blocking на Wi-Fi).
+        Если прямое соединение не открылось (сотовые операторы и строгие
+        NAT часто режут P2P) — АВТОМАТИЧЕСКИ включается запасной путь: те
+        же игровые пакеты ходят через broadcast-канал Supabase (релей,
+        гость 15 пак/с + хост 12 снимков/с = 27 пак/с — лимит Free-тарифа
+        100 сообщений/с на проект соблюдён с запасом) — игра идёт всегда.
+   Частоты: по P2P состояние гостя и снимки хоста 30 Гц + keepalive 0.67 Гц
+   по надёжному каналу (страховка от «мёртвого» быстрого канала); пакеты без
+   изменений не отправляются вовсе (покой = ноль трафика). События гостя
+   (монеты, стомпы) летят ОТДЕЛЬНЫМ надёжным пакетом E — потеря невозможна.
    Честные сообщения вместо «комната не найдена»: код проверяется и по
    presence (хост онлайн?), и по таблице rooms (если схемы развёрнуты).
    Отключение сети не ломает игру: Supabase не загрузился — сетевые кнопки
@@ -3146,16 +3155,20 @@ let SB = null;                         // клиент supabase-js — один 
 function netClient() {
   if (SB) return SB;
   const c = netCfg();
-  SB = supabase.createClient(c.url, c.key, { realtime: { params: { eventsPerSecond: 20 } } });
+  /* eventsPerSecond — клиентский троттлинг broadcast (30 даёт запас релею:
+     гость 15 + хост 12 = 27 пак/с; серверный лимит Free — 100 пак/с) */
+  SB = supabase.createClient(c.url, c.key, { realtime: { params: { eventsPerSecond: 30 } } });
   return SB;
 }
 const NET = {
   on:false, mode:null,                // 'host' | 'guest'
-  conn:null, code:'', eid:0,
+  conn:null, fast:null,               // основной канал + быстрый «f» (S/I без гарантий)
+  code:'', eid:0,
   wait:false, entering:false,         // лобби: ждём игрока / вводим код
   dial:null, full:false,              // идёт подключение / комната занята (уже двое)
   rtt:0, tPing:1.5, snapT:0, snapAge:0, lastWv:0, ckChanged:false,
-  sendHz:0, snapHz:30, tSend:0,       // релей снижает частоту пакетов (лимит канала)
+  sendHz:30, snapHz:30, tSend:0,      // частоты состояний: 30 Гц P2P / 15+12 Гц релей
+  lastI:'', lastS:'', tKeep:0,        // дедупликация пакетов + страховка по надёжному каналу
   testFast:false,                     // только для автотестов: ускоряет таймеры в 10 раз
   rp:{ x:240, y:242, px:240, py:242, vx:0, vy:0, face:1, animT:0, grounded:true,
        inv:0, hp:3, rx:240, ry:242 }, // удалённый игрок (гость у хоста / хост у гостя)
@@ -3166,17 +3179,19 @@ const SB_WD = 25000;                   // сторож гостя: хост та
 const TSC = NET.testFast ? 0.1 : 1;    // масштаб таймеров (автотесты ×10 быстрее)
 /* Схема БЕЗ ЛАГОВ: каждый игрок симулирует СВОЕГО героя локально (нулевая
    задержка ввода), хост авторитетен для врагов/волн/счёта. Гость шлёт своё
-   состояние 60 раз/с (по P2P) или 12 раз/с (по релею), хост отвечает
-   снимками 30 или 10 раз/с — на чужую половину экрана накатывается
-   линейная интерполяция, поэтому всё выглядит плавно на любом пути. */
+   состояние 30 раз/с (P2P) или 15 раз/с (релей), хост отвечает снимками 30
+   или 12 раз/с — на чужую половину экрана накатывается линейная
+   интерполяция, поэтому всё выглядит плавно на любом пути. Потоки S/I идут
+   по БЫСТРОМУ каналу (потеря пакета терпима), события и страховка — по
+   надёжному; пакет без изменений не отправляется вовсе. */
 /* ---------- сигналинг Supabase Realtime: канал = комната «bob5a-КОД» ----------
    Сообщения канала (event 'g'): знакомство JOIN/OFFER/ANSWER/ICE/FULL,
    релей-рукопожатие RHELLO/RACK и игровые пакеты релея RD. Поля fr (кто) и
    to (кому) — адресация: чужие сообщения молча игнорируются. */
 NET.sb = null;                         // { chan, role, me, pcs, t, wd, ff, rh, rh0, hb, hw, pres, peer, guestKey }
-function netDcWire(dc, role) {         // data-канал WebRTC → обёртка под netWire/netSend
-  const ls = {};
-  const c = { kind:'dc', open:false,
+function netDcWire(dc, role, fast) {   // data-канал WebRTC → обёртка под netWire/netSend
+  const ls = {};                       // fast=true: «быстрый» канал f (unordered, без ретрансмитов)
+  const c = { kind:'dc', fast:!!fast, label:dc.label || (fast ? 'f' : 'g'), open:false,
     on(ev, cb) { (ls[ev] = ls[ev] || []).push(cb); },
     emit(ev, ...a) { (ls[ev] || []).forEach(cb => { try { cb(...a); } catch (e) {} }); } };
   dc.onopen = () => { c.open = true; c.emit('open'); };
@@ -3185,8 +3200,18 @@ function netDcWire(dc, role) {         // data-канал WebRTC → обёрт�
   dc.onclose = () => { c.open = false; c.emit('close'); };
   dc.onerror = () => {};               // обрыв увидит onclose
   c.send = o => { try { dc.send(JSON.stringify(o)); } catch (e) {} };
+  c.sendRaw = s => { try { dc.send(s); } catch (e) {} };  // уже посчитанная JSON-строка
   c.close = () => { try { dc.close(); } catch (e) {} };
   return c;
+}
+function netSbFastAttach(w, role) {    // быстрый канал: только потоки S/I, без логики лобби
+  w.on('open', () => { if (!NET.fast) NET.fast = w; });
+  w.on('data', d => netData(role, d));
+  w.on('close', () => { if (NET.fast === w) NET.fast = null; });
+}
+function netSendFast(o, raw) {         // состояния (S/I): быстрый канал, иначе — основной
+  if (NET.fast && NET.fast.open) { try { NET.fast.sendRaw(raw || JSON.stringify(o)); } catch (e) {} return; }
+  netSend(o);
 }
 function netRelayWire() {              // запасной канал: те же пакеты через Supabase
   const ls = {};
@@ -3231,8 +3256,10 @@ function netSbClaim(w, peer) {         // канал открыт (P2P или р
   clearInterval(NET.sb.hb); clearInterval(NET.sb.hw);
   NET.sb.peer = peer || NET.sb.peer || '';
   NET.conn = w; NET.dial = null;
-  NET.sendHz = w.kind === 'relay' ? 12 : 0;   // 0 = каждый кадр (P2P, 60 Гц)
-  NET.snapHz = w.kind === 'relay' ? 10 : 30;
+  NET.sendHz = w.kind === 'relay' ? 15 : 30;  // гость: 15 пак/с в релее, 30 пак/с по P2P
+  NET.snapHz = w.kind === 'relay' ? 12 : 30;
+  NET.tSend = 0; NET.tKeep = 0.6;             // первый keepalive вскоре после старта
+  NET.lastI = ''; NET.lastS = ''; NET.fast = null;
   netWire(w, NET.sb.role);
   if (w.kind === 'relay') w.emit('open');   // релей уже «открыт»: рукопожатие H/W стартует сразу
   if (NET.sb.role === 'host' && NET.dbOk === true)   // в Postgres: комната в игре
@@ -3283,8 +3310,10 @@ function netSbMsg(role, m) {           // сигнальные сообщени�
         sb.pcs.delete(m.fr);
       }
       const pc = netSbPc(m.fr);
-      const dc = pc.createDataChannel('g', { ordered:true });
-      const w = netDcWire(dc, 'host');
+      const dc = pc.createDataChannel('g', { ordered:true });      // надёжный: рукопожатие/события
+      const w = netDcWire(dc, 'host', false);
+      const df = pc.createDataChannel('f', { ordered:false, maxRetransmits:0 }); // быстрый: S/I
+      netSbFastAttach(netDcWire(df, 'host', true), 'host');
       const fr = m.fr;
       w.on('open', () => netSbClaim(w, fr));
       pc.createOffer().then(o => pc.setLocalDescription(o)).then(() =>
@@ -3308,8 +3337,12 @@ function netSbMsg(role, m) {           // сигнальные сообщени�
       }
       if (sb.pcs.has(m.fr)) return;
       const pc = netSbPc(m.fr);
-      pc.ondatachannel = ev => {                      // канал данных от хоста
-        const w = netDcWire(ev.channel, 'guest');
+      pc.ondatachannel = ev => {                      // каналы данных от хоста: g и f
+        if ((ev.channel.label || '') === 'f') {       // быстрый: потоки S/I, без гарантий
+          netSbFastAttach(netDcWire(ev.channel, 'guest', true), 'guest');
+          return;
+        }
+        const w = netDcWire(ev.channel, 'guest', false);
         netSbClaim(w, m.fr);
         if (ev.channel.readyState === 'open') { w.open = true; w.emit('open'); }
       };
@@ -3435,9 +3468,10 @@ function netClose() {
   clearInterval(NET.helloT);
   try { if (NET.conn) NET.conn.close(); } catch (e) {}
   netSbStop();
-  NET.on = false; NET.mode = null; NET.conn = null; NET.code = '';
+  NET.on = false; NET.mode = null; NET.conn = null; NET.fast = null; NET.code = '';
   NET.wait = false; NET.dial = null; NET.full = false;
-  NET.sendHz = 0; NET.snapHz = 30; NET.tSend = 0;
+  NET.sendHz = 30; NET.snapHz = 30; NET.tSend = 0;
+  NET.lastI = ''; NET.lastS = ''; NET.tKeep = 0;
   NET.mirror.clear(); NET.lastWv = 0; NET.rp.hp = 3;
   NET.rp.rx = 240; NET.rp.ry = 242;
 }
@@ -3521,6 +3555,17 @@ function netWire(conn, role) {
     else note('НАПАРНИК ОТКЛЮЧИЛСЯ — ПРОДОЛЖАЕМ ВДВОЁМ… ОДИН', 3.5);
   });
 }
+function netGuestEvents(d) {          // события гостя (стомпы/монеты) — пакет E, надёжный канал
+  if (d.st) for (const id of d.st) {  // гость прыгнул врагу на голову
+    const e = L.enemies.find(e => e.id === id);
+    if (e && !e.dead) { e.dead = 'squish'; e.t = 0; ARN.score += 200;
+      puff(e.x+7, e.y+e.h-2, 4, 40); L.floats.push({x:e.x, y:e.y-8, txt:'200', t:0}); }
+  }
+  if (d.cc) for (const ci of d.cc) {  // гость собрал монеты
+    const c = L.coins[ci];
+    if (c && !c.taken) { c.taken = true; ARN.score += CFG.SCORE.coin; NET.ckChanged = true; }
+  }
+}
 function netData(role, d) {
   if (!d || typeof d !== 'object') return;
   if (role === 'host') {
@@ -3531,24 +3576,19 @@ function netData(role, d) {
       arenaStart();
       netSend({ t:'W', hp:ARN.hearts });
       note('ИГРОК 2 ПОДКЛЮЧИЛСЯ!', 2.5);
-    } else if (d.t === 'I' && NET.on) {          // состояние гостя (60/12 Гц) — доверяем и рисуем
+    } else if (d.t === 'I' && NET.on) {          // состояние гостя (30/15 Гц) — доверяем и рисуем
       const g = NET.rp;
       g.x = d.x; g.y = d.y; g.vx = d.vx; g.face = d.f; g.animT = d.a;
       g.grounded = !!d.g; g.inv = d.iv || 0; g.seen = gTime;   // метка живости для таймаута
       if (typeof d.hp === 'number') g.hp = d.hp;
-      if (d.st) for (const id of d.st) {         // гость прыгнул врагу на голову
-        const e = L.enemies.find(e => e.id === id);
-        if (e && !e.dead) { e.dead = 'squish'; e.t = 0; ARN.score += 200;
-          puff(e.x+7, e.y+e.h-2, 4, 40); L.floats.push({x:e.x, y:e.y-8, txt:'200', t:0}); }
-      }
-      if (d.cc) for (const ci of d.cc) {         // гость собрал монеты
-        const c = L.coins[ci];
-        if (c && !c.taken) { c.taken = true; ARN.score += CFG.SCORE.coin; NET.ckChanged = true; }
-      }
+    } else if (d.t === 'E' && NET.on) {          // события гостя — потеря невозможна
+      netGuestEvents(d);
     } else if (d.t === 'R' && ARN.over) {        // гость просит новый забег
       arenaStart(); netSend({ t:'RS' });
     } else if (d.t === 'PK' && NET.on) arenaPk(); // напарник прыгнул на голову
-    else if (d.t === 'Q') netSend({ t:'P', ts:d.ts });
+    else if (d.t === 'Q' && !d.tg) netSend({ t:'P', ts:d.ts });
+    /* тег tg у Q: эхо-ответ гостя хост не пересылает обратно — иначе
+       P↔Q зациклится навсегда (при релее — сотни пакетов/с и лимиты) */
   } else {
     if (d.t === 'W') {                // хост подтвердил старт
       NET.on = true; NET.mode = 'guest'; NET.lastWv = 0;
@@ -3645,17 +3685,28 @@ function netGuestTick(dt) {           // гость: анимация зерка
     m.t += dt;
     m.ix = lerp(m.px, m.x, Math.min(1, k)); m.iy = lerp(m.py, m.y, Math.min(1, k));
   }
-  if (NET.sendHz > 0) {               // релей: шлём состояние реже (лимит канала 20 сообщ/с)
-    NET.tSend -= dt;
-    if (NET.tSend > 0) return;
-    NET.tSend = 1 / NET.sendHz;
+  NET.tKeep -= dt;                    // страховка: состояние уходит и по надёжному каналу
+  const due = (NET.sendHz || 0) === 0 || ((NET.tSend -= dt) <= 0);
+  if (!due && NET.tKeep > 0) return;  // тишина: пакет без изменений не шлём вовсе
+  if ((NET.sendHz || 0) > 0) NET.tSend = 1 / NET.sendHz;
+  const msg = { t:'I', x:Math.round(P.x*10)/10, y:Math.round(P.y*10)/10, vx:Math.round(P.vx*10)/10,
+                f:P.face, a:Math.round(P.animT*100)/100, g:P.grounded?1:0, iv:Math.round(P.inv*100)/100,
+                hp:ARN.hearts };
+  const raw = JSON.stringify(msg);
+  if (raw !== NET.lastI) {            // состояние изменилось: быстрый канал (потеря не страшна)
+    NET.lastI = raw;
+    netSendFast(msg, raw);
   }
-  netSend({ t:'I', x:Math.round(P.x*10)/10, y:Math.round(P.y*10)/10, vx:Math.round(P.vx*10)/10,
-            f:P.face, a:Math.round(P.animT*100)/100, g:P.grounded?1:0, iv:Math.round(P.inv*100)/100,
-            hp:ARN.hearts, st:NET.ev.st.length ? NET.ev.st : 0, cc:NET.ev.cc.length ? NET.ev.cc : 0 });
-  NET.ev.st.length = 0; NET.ev.cc.length = 0;
+  if (NET.tKeep <= 0) {               // keepalive 0.67 Гц по надёжному каналу: сторожа живы
+    NET.tKeep = 1.5;
+    netSend(msg);
+  }
+  if (NET.ev.st.length || NET.ev.cc.length) {   // события — всегда надёжно, отдельным пакетом
+    netSend({ t:'E', st:NET.ev.st.length ? NET.ev.st : 0, cc:NET.ev.cc.length ? NET.ev.cc : 0 });
+    NET.ev.st.length = 0; NET.ev.cc.length = 0;
+  }
 }
-function netHostTick(dt) {            // хост: сглаживание гостя, пинг, снимки 30/10 Гц
+function netHostTick(dt) {            // хост: сглаживание гостя, пинг, снимки 30/12 Гц
   const g = NET.rp;
   if (!ARN.over && g.seen && gTime - g.seen > 4) {   // тишина от гостя — связь умерла
     netClose(); note('НАПАРНИК ОТКЛЮЧИЛСЯ', 3); return;
@@ -3664,20 +3715,33 @@ function netHostTick(dt) {            // хост: сглаживание гос
   g.rx += (g.x - g.rx) * s; g.ry += (g.y - g.ry) * s;
   NET.tPing -= dt;
   if (NET.tPing <= 0) { NET.tPing = 2; netSend({ t:'P', ts:Date.now() }); }
+  NET.tKeep -= dt;                    // страховка: снимок уходит и по надёжному каналу
   NET.snapT -= dt;
-  if (NET.snapT <= 0) { NET.snapT = 1/(NET.snapHz || 30);
-    const en = [];
-    for (const e of L.enemies)
-      en.push([e.id, Math.round(e.x*10)/10, Math.round(e.y*10)/10, e.dir,
-               e.type === 'crawler' ? 0 : e.type === 'shielder' ? 1 : 2,
-               e.state === 'shell' ? 1 : 0, e.dead ? 1 : 0]);
-    const msg = { t:'S',
-      p:[Math.round(P.x*10)/10, Math.round(P.y*10)/10, Math.round(P.vx*10)/10, P.face,
-         Math.round(P.animT*100)/100, P.grounded?1:0, Math.round(P.inv*100)/100, ARN.hearts],
-      en, sc:ARN.score, wv:ARN.wave, ov:ARN.over ? 1 : 0, pi:NET.rtt|0 };
-    if (NET.ckChanged) { NET.ckChanged = false;
-      msg.ck = []; for (let i = 0; i < L.coins.length; i++) if (L.coins[i].taken) msg.ck.push(i); }
+  const due = NET.snapT <= 0, kaDue = NET.tKeep <= 0;
+  if (!due && !kaDue) return;         // без изменений и не пора страховаться — ноль пакетов
+  if (due) NET.snapT = 1/(NET.snapHz || 30);
+  const en = [];
+  for (const e of L.enemies)
+    en.push([e.id, Math.round(e.x*10)/10, Math.round(e.y*10)/10, e.dir,
+             e.type === 'crawler' ? 0 : e.type === 'shielder' ? 1 : 2,
+             e.state === 'shell' ? 1 : 0, e.dead ? 1 : 0]);
+  const msg = { t:'S',
+    p:[Math.round(P.x*10)/10, Math.round(P.y*10)/10, Math.round(P.vx*10)/10, P.face,
+       Math.round(P.animT*100)/100, P.grounded?1:0, Math.round(P.inv*100)/100, ARN.hearts],
+    en, sc:ARN.score, wv:ARN.wave, ov:ARN.over ? 1 : 0, pi:NET.rtt|0 };
+  if (NET.ckChanged || kaDue) {       // монеты: при изменении и полным списком в keepalive
+    msg.ck = []; for (let i = 0; i < L.coins.length; i++) if (L.coins[i].taken) msg.ck.push(i);
+  }
+  const raw = JSON.stringify(msg);
+  if (raw !== NET.lastS) {            // изменилось: быстрый канал (потеря пакета не задерживает)
+    NET.lastS = raw;
+    netSendFast(msg, raw);
+    NET.ckChanged = false;
+  }
+  if (kaDue) {                        // keepalive 0.67 Гц по надёжному каналу: монеты точно дойдут
+    NET.tKeep = 1.5;
     netSend(msg);
+    NET.ckChanged = false;
   }
 }
 function updateArenaEnemies(dt) {
@@ -4012,14 +4076,13 @@ function renderArenaMenu() {
     txt(NET.code, CFG.VW/2, p.y + 52, 22, '#ffe98a', 'center');
     const dots = '.'.repeat(1 + (Math.floor(uiTime*2) % 3));
     txt('ОЖИДАНИЕ ИГРОКА ' + dots, CFG.VW/2, p.y + 90, 9, 'rgba(255,255,255,.85)', 'center');
-        if (NET.sb && NET.sb.pres) {             // presence: сколько игроков сейчас в комнате
+                        if (NET.sb && NET.sb.pres) {             // presence: сколько игроков сейчас в комнате
       const pr = NET.sb.pres, lnk = NET.conn || NET.on;
       txt('в комнате: ' + Math.min(pr.total, 2) + ' из 2' +
           (lnk ? ' — связь есть!' :
            pr.total > 1 ? ' — налаживаем связь…' : ' — ждём второго…'),
           CFG.VW/2, p.y + 106, 8, lnk ? 'rgba(140,255,170,.95)' : 'rgba(140,255,170,.75)', 'center');
-    }
-    drawArenaBtn(arnCancelRect(), 'ОТМЕНА');
+    }drawArenaBtn(arnCancelRect(), 'ОТМЕНА');
     txt('другой игрок выбирает «ВОЙТИ ПО КОДУ» и вводит его', CFG.VW/2, p.y + 150, 8, 'rgba(255,255,255,.55)', 'center');
   } else {
     txt('РЕЖИМ «АРЕНА»', CFG.VW/2, p.y + 14, 13, '#ffd800', 'center');
