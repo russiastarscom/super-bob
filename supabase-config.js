@@ -10,3 +10,16 @@ window.SUPABASE_CFG = {
   url: 'https://haskxauivkflazbhthmt.supabase.co',
   key: 'sb_publishable_WYTOOey1XNYKL_OCMEHrmQ_c2ObdPe3'
 };
+
+/* ---------- ТЕЛЕМЕТРИЯ: подгружаем metrics.js сразу после конфига ----------
+   Асинхронно — игру не задерживает; сам index.html НЕ меняется.
+   Сбор метрик живёт в metrics.js, просмотр — в admin.html (кнопка
+   «АДМИН» на титульном экране появляется из metrics.js). */
+(function () {
+  try {
+    var s = document.createElement('script');
+    s.src = 'metrics.js';
+    s.async = true;
+    (document.head || document.documentElement).appendChild(s);
+  } catch (e) {}
+})();
