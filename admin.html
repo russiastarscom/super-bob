@@ -5,15 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SUPER BOB — Админ-панель</title>
 <!-- ============================================================
-     SUPER BOB — АДМИН-ПАНЕЛЬ (admin.html) — ОТДЕЛЬНЫЙ ФАЙЛ
+     SUPER BOB — АДМИН-ПАНЕЛЬ (admin.html) — ОТДЕЛЬНЫЙ ФАЙЛ, ПОД ПАРОЛЕМ
      Метрики игроков: где остановился, когда ушёл, вернулся ли.
-     Открывается рядом с index.html (тот же домен/папка):
-       https://…/admin.html   или   index.html → кнопка «АДМИН»
+     ОТКРЫВАТЬ ПО ПРЯМОЙ ССЫЛКЕ:  https://…/admin.html
+     (кнопки «АДМИН» внутри игры больше нет — игроки панель не видят)
+     ПАРОЛЬ ПО УМОЛЧАНИЮ: superbob2026   — обязательно смените его!
+     Как сменить: откройте admin.html, в консоли браузера (F12) выполните
+       await bob5AdminHashes('НОВЫЙ_ПАРОЛЬ')
+     и впишите напечатанные значения в PW_SHA256 и PW_FB в скрипте ниже.
      Источники данных (переключатель в шапке):
        • Supabase — таблицы player_sessions / player_events
          (схема — supabase-schema.sql; все игроки всех устройств);
        • Локально — localStorage этого браузера (работает без сети,
          удобно для отладки на одном устройстве).
+     ЕСЛИ SUPABASE ОТВЕЧАЕТ 404 (схема не развёрнута): панель больше не
+     падает с ошибкой — она сама переключается на «Локально» и показывает
+     инструкцию развёртывания схемы; после «Run» в SQL Editor достаточно
+     нажать «Обновить», и общий источник включится сам.
+     ЗАЩИТА (честно): пароль в статической странице — замок от любопытных
+     игроков, а не криптография: технически подкованный человек может
+     заглянуть в исходник. Данные метрик в Supabase читаются публичным
+     ключом проекта; строгий режим (чтение только по логину) описан в
+     конце supabase-schema.sql, блок «ХОЧЕТСЯ СТРОЖЕ».
      Никаких библиотек: чистый HTML/CSS/JS, стиль игры.
      ============================================================ -->
 <style>
@@ -41,6 +54,33 @@
   .chk input { width:auto; accent-color:#ffd800; }
   #status { margin-left:auto; font-size:12px; color:#8a92a6; }
   #status .ok { color:#7be08a; } #status .err { color:#ff6a5a; }
+  #status .warn { color:#ffb02e; }
+  /* ---------- ПАРОЛЬ-ГЕЙТ ---------- */
+  #gate { position:fixed; inset:0; z-index:100; background:#05060f;
+    display:flex; align-items:center; justify-content:center; padding:20px; }
+  #gate .box { max-width:420px; width:100%; text-align:center; background:#0b1022;
+    border:1px solid rgba(255,216,0,.45); border-radius:12px; padding:28px 26px;
+    box-shadow:0 10px 40px rgba(0,0,0,.7); }
+  #gate h1 { font-size:18px; margin-bottom:6px; }
+  #gate .sub { color:#8a92a6; font-weight:normal; }
+  #gate p { color:#8a92a6; font-size:12px; line-height:1.5; margin:6px 0 14px; }
+  #gate input { width:100%; font-size:15px; letter-spacing:.2em; text-align:center; }
+  #gate button { width:100%; margin-top:10px; padding:9px 10px; font-size:14px;
+    background:#101632; letter-spacing:.14em; }
+  #gerr { color:#ff6a5a; font-size:12px; min-height:16px; margin-top:10px; }
+  #gate.shake .box { animation:bobshake .35s; }
+  @keyframes bobshake { 25%{transform:translateX(-6px)} 50%{transform:translateX(6px)}
+    75%{transform:translateX(-3px)} }
+  body.locked > header, body.locked > nav, body.locked > main { display:none; }
+  /* ---------- ПОДСКАЗКА РАЗВЁРТЫВАНИЯ СХЕМЫ (показывается при HTTP 404) ---------- */
+  #schemahelp { display:none; background:#141b38; border:1px solid rgba(255,176,46,.55);
+    border-radius:10px; padding:14px 16px; margin:0 0 14px; font-size:13px;
+    line-height:1.6; color:#e8eaf2; }
+  #schemahelp b { color:#ffb02e; }
+  #schemahelp ol { margin:8px 0 10px 20px; }
+  #schemahelp li { margin:3px 0; }
+  #schemahelp code { background:#05060f; padding:1px 6px; border-radius:4px;
+    border:1px solid rgba(255,216,0,.3); }
   /* ---------- ВКЛАДКИ ---------- */
   nav { display:flex; flex-wrap:wrap; gap:6px; padding:10px 18px 0; }
   nav button { border-radius:6px 6px 0 0; color:#aab2c4; }
@@ -84,7 +124,19 @@
     border:1px solid rgba(255,216,0,.4); color:#ffd800; margin-left:6px; }
 </style>
 </head>
-<body>
+<body class="locked">
+
+<!-- ---------- ПАРОЛЬ-ГЕЙТ: панель скрыта, пока не введён пароль ---------- -->
+<div id="gate">
+  <form class="box" id="gateForm" autocomplete="off">
+    <h1>SUPER BOB <span class="sub">· админ-панель</span></h1>
+    <p>Панель метрик защищена паролем.<br>Введите пароль администратора, чтобы продолжить.</p>
+    <input type="password" id="gpw" placeholder="пароль…" autocomplete="current-password">
+    <button type="submit" id="gok">ВОЙТИ</button>
+    <div id="gerr"></div>
+  </form>
+</div>
+
 <header>
   <h1>SUPER BOB <span class="sub">· админ-панель · метрики игроков</span></h1>
   <div class="bar">
@@ -119,6 +171,24 @@
 </nav>
 
 <main>
+  <!-- ============ SUPABASE 404: СХЕМА НЕ РАЗВЁРНУТА — инструкция ============ -->
+  <div id="schemahelp">
+    <b>Supabase отвечает HTTP 404 — таблицы телеметрии ещё не созданы.</b><br>
+    Панель автоматически переключилась на «Локально»: сейчас видны данные только
+    этого браузера, а не всех игроков. Чтобы метрики всех игроков собирались в
+    общей базе, разверните схему один раз (займёт пару минут):
+    <ol>
+      <li>Откройте <a href="https://supabase.com/dashboard" target="_blank" rel="noopener">supabase.com/dashboard</a> → ваш проект <code>haskxauivkflazbhthmt</code>.</li>
+      <li>В левом меню: <code>SQL Editor</code> → <code>New query</code>.</li>
+      <li>Вставьте туда весь файл <code>supabase-schema.sql</code> из папки игры
+        (кнопка ниже копирует его в буфер обмена) и нажмите <code>Run</code>.</li>
+      <li>Вернитесь в панель и нажмите <code>Обновить</code> — источник «Supabase»
+        включится сам, а эта подсказка исчезнет.</li>
+    </ol>
+    <button id="copySql">Скопировать supabase-schema.sql</button>
+    <span id="copyMsg" style="color:#7be08a; margin-left:8px"></span>
+  </div>
+
   <!-- ============ ОБЗОР ============ -->
   <section id="ov" class="on">
     <div class="kpis" id="kpis"></div>
@@ -218,6 +288,53 @@ function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g,
   c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
 function shortPid(p) { return p ? p.slice(0, 8) : '—'; }
 
+/* ---------- ПАРОЛЬ-ГЕЙТ ----------
+   Пароль хранится только хешами: PW_SHA256 — SHA-256 через crypto.subtle
+   (безопасный контекст), PW_FB — запасной краткий хеш для старых браузеров,
+   где crypto.subtle недоступен. Смена пароля — см. шапку файла. */
+const PW_SHA256 = 'ccaab578e6ed3fc0c5c8af734f067843f65f84ec273ca6fa29ccc43f203bd208';
+const PW_FB     = 'd1a19b4d35e44227';
+function fbHash(s) { let h1 = 5381, h2 = 52711; const str = 'bob5-admin:' + s;
+  for (let r = 0; r < 2; r++) for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i);
+    h1 = ((h1 << 5) + h1 + c) >>> 0; h2 = (((h2 << 5) + h2) ^ c) >>> 0; }
+  return ('0000000' + h1.toString(16)).slice(-8) + ('0000000' + h2.toString(16)).slice(-8); }
+async function pwHash(pw) {
+  try { const d = new TextEncoder().encode(pw);
+    if (window.crypto && crypto.subtle) {
+      const b = await crypto.subtle.digest('SHA-256', d);
+      return Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2, '0')).join(''); } }
+  catch (e) {}
+  return fbHash(pw);
+}
+/* хелпер смены пароля: в консоли  await bob5AdminHashes('новый пароль')  */
+async function bob5AdminHashes(pw) { return { PW_SHA256: await pwHash(pw), PW_FB: fbHash(pw) }; }
+window.bob5AdminHashes = bob5AdminHashes;
+
+let failCount = 0, lockUntil = 0;
+$('gateForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const $err = $('gerr'), t = Date.now();
+  if (t < lockUntil) { $err.textContent = 'Слишком много попыток — подождите ' +
+    Math.ceil((lockUntil - t) / 1000) + ' с.'; return; }
+  const pw = $('gpw').value;
+  if (!pw) { $err.textContent = 'Введите пароль.'; return; }
+  const h = await pwHash(pw);
+  if (h === PW_SHA256 || h === PW_FB) { $err.textContent = ''; unlock(); return; }
+  failCount++;
+  if (failCount >= 5) { lockUntil = Date.now() + 10000; failCount = 0;
+    $err.textContent = 'Неверный пароль. Слишком много попыток — пауза 10 с.'; }
+  else $err.textContent = 'Неверный пароль (попытка ' + failCount + ' из 5).';
+  $('gpw').value = ''; $('gpw').focus();
+  const g = $('gate'); g.classList.remove('shake'); void g.offsetWidth; g.classList.add('shake');
+});
+function unlock() {
+  document.body.classList.remove('locked');
+  $('gate').style.display = 'none';
+  try { sessionStorage.setItem('bob5_admin_ok', '1'); } catch (e) {}
+  if (autoT == null) autoT = setInterval(reload, 20000);
+  reload();
+}
+
 const STATE_RU = { title:'В меню', intro:'Интро истории', select:'Выбор уровня', shop:'Магазин',
   about:'О игре', pause:'Пауза', play:'Игра', clear:'Уровень пройден', over:'Игра окончена',
   arenaMenu:'Лобби арены', arena:'Арена', results:'Итоги', final:'Финал игры',
@@ -263,10 +380,11 @@ async function loadSupa() {
   if (from) sUrl += '&started_at=gte.' + from;
   let eUrl = base + 'player_events?order=created_at.desc&limit=2000';
   if (from) eUrl += '&created_at=gte.' + from;
-  const [rs, re] = await Promise.all([
-    fetch(sUrl, { headers: H }).then(r => { if (!r.ok) throw new Error('sessions HTTP ' + r.status); return r.json(); }),
-    fetch(eUrl, { headers: H }).then(r => { if (!r.ok) throw new Error('events HTTP ' + r.status); return r.json(); })
-  ]);
+  /* ошибка несёт HTTP-код: 404 = таблиц нет (схема не развёрнута) */
+  const req = (url, what) => fetch(url, { headers: H }).then(r => {
+    if (!r.ok) { const e = new Error(what + ' HTTP ' + r.status); e.status = r.status; throw e; }
+    return r.json(); });
+  const [rs, re] = await Promise.all([req(sUrl, 'sessions'), req(eUrl, 'events')]);
   SESS = (rs || []).map(r => Object.assign({}, r, { snap: r }));   // колонки = плоский снапшот
   EVTS = (re || []).map(r => ({ t: r.created_at, pid: r.pid, sid: r.sid, kind: r.kind, p: r.payload || {} }));
 }
@@ -281,21 +399,37 @@ function loadLocal() {
   SESS = SESS.map(s => Object.assign({}, s, { snap: Object.assign({}, s.snap || {}, s) }));
   EVTS = evt.filter(e => !from || new Date(e.t) >= new Date(from));
 }
+let supaMissing = false;         // HTTP 404 — схема телеметрии в Supabase не развёрнута
 async function reload() {
   setStatus('Загрузка…', '');
-  try {
-    if (srcMode === 'supa') {
-      if (!netOk()) throw new Error('supabase-config.js не заполнен');
+  $('schemahelp').style.display = 'none';
+  if (srcMode === 'supa') {
+    if (!netOk()) { SESS = []; EVTS = [];
+      setStatus('<span class="err">supabase-config.js не заполнен — включите «Локально»</span>', 'err');
+      render(); return; }
+    try {
       await loadSupa();
+      supaMissing = false;
       setStatus('<span class="ok">Supabase: ' + SESS.length + ' сессий, ' + EVTS.length + ' событий</span>', 'ok');
-    } else {
-      loadLocal();
-      setStatus('<span class="ok">Локально: ' + SESS.length + ' сессий, ' + EVTS.length + ' событий</span>', 'ok');
+    } catch (e) {
+      if (e.status === 404) {
+        /* ТАБЛИЦ ЕЩЁ НЕТ — паникуем молча: показываем локальные данные
+           этого браузера и инструкцию развёртывания. После «Run» схемы
+           «Обновить» (или автообновление) вернёт общий источник сам. */
+        supaMissing = true;
+        loadLocal();
+        setStatus('<span class="warn">Supabase: схема не развёрнута (HTTP 404) → показаны локальные данные этого браузера. Инструкция ниже.</span>', 'warn');
+        $('schemahelp').style.display = 'block';
+      } else {
+        SESS = []; EVTS = [];
+        setStatus('<span class="err">' + esc(e.message || e) +
+          ' — проверьте ключ в supabase-config.js или включите «Локально»</span>', 'err');
+      }
     }
-  } catch (e) {
-    SESS = []; EVTS = [];
-    setStatus('<span class="err">' + esc(e.message || e) +
-      ' — проверьте, что схема (supabase-schema.sql) развёрнута, или включите «Локально»</span>', 'err');
+  } else {
+    supaMissing = false;
+    loadLocal();
+    setStatus('<span class="ok">Локально: ' + SESS.length + ' сессий, ' + EVTS.length + ' событий</span>', 'ok');
   }
   render();
 }
@@ -583,10 +717,42 @@ $('csv').addEventListener('click', csv);
 $('evKind').addEventListener('change', render);
 $('evSearch').addEventListener('input', render);
 $('auto').addEventListener('change', e => {
-  if (e.target.checked) autoT = setInterval(reload, 20000);
-  else { clearInterval(autoT); autoT = null; } });
-let autoT = setInterval(reload, 20000);
-reload();
+  if (e.target.checked && autoT == null) autoT = setInterval(reload, 20000);
+  else if (!e.target.checked && autoT) { clearInterval(autoT); autoT = null; } });
+
+/* кнопка «Скопировать supabase-schema.sql» в подсказке про HTTP 404 */
+async function copyText(t) {
+  try { if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(t); return true; } } catch (e) {}
+  try { const ta = document.createElement('textarea'); ta.value = t;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy'); ta.remove(); return ok; }
+  catch (e) { return false; }
+}
+$('copySql').addEventListener('click', async () => {
+  const msg = $('copyMsg');
+  try {
+    const r = await fetch('supabase-schema.sql');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const t = await r.text();
+    msg.textContent = (await copyText(t))
+      ? 'Скопировано — вставьте в SQL Editor и нажмите Run'
+      : 'Файл прочитан, но буфер недоступен — скопируйте текст вручную.';
+  } catch (e) {
+    msg.textContent = 'Не удалось прочитать файл — откройте supabase-schema.sql из папки игры и скопируйте вручную.';
+  }
+  setTimeout(() => { msg.textContent = ''; }, 8000);
+});
+
+let autoT = null;
+/* СТАРТ: панель открывается только после пароля (unlock сам вызывает reload).
+   Возвращение в открытую вкладку по sessionStorage — пароль не спрашиваем. */
+(function initGate() {
+  let ok = false; try { ok = sessionStorage.getItem('bob5_admin_ok') === '1'; } catch (e) {}
+  if (ok) unlock();
+  else setTimeout(() => { try { $('gpw').focus(); } catch (e) {} }, 150);
+})();
 </script>
 </body>
 </html>
