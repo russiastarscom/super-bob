@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SUPER BOB — Админ-панель</title>
+<!-- ============================================================
+     SUPER BOB — АДМИН-ПАНЕЛЬ (admin.html) — ОТДЕЛЬНЫЙ ФАЙЛ
+     Метрики игроков: где остановился, когда ушёл, вернулся ли.
+     Открывается рядом с index.html (тот же домен/папка):
+       https://…/admin.html   или   index.html → кнопка «АДМИН»
+     Источники данных (переключатель в шапке):
+       • Supabase — таблицы player_sessions / player_events
+         (схема — supabase-schema.sql; все игроки всех устройств);
+       • Локально — localStorage этого браузера (работает без сети,
+         удобно для отладки на одном устройстве).
+     Никаких библиотек: чистый HTML/CSS/JS, стиль игры.
+     ============================================================ -->
+<style>
+  :root { color-scheme: dark; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#05060f; color:#e8eaf2; font-family:"Courier New", monospace;
+    min-height:100vh; padding-bottom:60px; }
+  a { color:#ffd800; }
+  /* ---------- ШАПКА ---------- */
+  header { position:sticky; top:0; z-index:10; background:rgba(5,6,15,.96);
+    border-bottom:1px solid rgba(255,216,0,.35); padding:12px 18px 10px;
+    box-shadow:0 4px 18px rgba(0,0,0,.6); }
+  h1 { font-size:20px; letter-spacing:.14em; color:#ffd800;
+    text-shadow:0 0 14px rgba(255,216,0,.35); }
+  h1 .sub { color:#8a92a6; font-weight:normal; letter-spacing:.05em; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; margin-top:10px; }
+  .bar label { color:#8a92a6; font-size:12px; }
+  select, button, input { background:#0b1022; color:#e8eaf2; border:1px solid rgba(255,216,0,.45);
+    font-family:inherit; font-size:13px; padding:5px 10px; border-radius:6px; outline:none; }
+  select:focus, input:focus { border-color:#ffd800; }
+  button { cursor:pointer; }
+  button:hover { background:#141b38; }
+  button.warn { border-color:rgba(255,90,42,.6); color:#ff8c6a; }
+  .chk { display:flex; align-items:center; gap:5px; font-size:12px; color:#8a92a6; cursor:pointer; }
+  .chk input { width:auto; accent-color:#ffd800; }
+  #status { margin-left:auto; font-size:12px; color:#8a92a6; }
+  #status .ok { color:#7be08a; } #status .err { color:#ff6a5a; }
+  /* ---------- ВКЛАДКИ ---------- */
+  nav { display:flex; flex-wrap:wrap; gap:6px; padding:10px 18px 0; }
+  nav button { border-radius:6px 6px 0 0; color:#aab2c4; }
+  nav button.on { color:#ffd800; border-color:#ffd800; background:#101632; }
+  main { padding:14px 18px; }
+  section { display:none; } section.on { display:block; }
+  h2 { font-size:15px; color:#ffd800; margin:16px 0 8px; letter-spacing:.08em; }
+  /* ---------- KPI ---------- */
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  .kpi { background:#0b1022; border:1px solid rgba(255,216,0,.25); border-radius:10px;
+    padding:12px 14px; }
+  .kpi .v { font-size:22px; color:#ffd800; }
+  .kpi .t { font-size:11px; color:#8a92a6; margin-top:4px; line-height:1.35; }
+  /* ---------- ТАБЛИЦЫ ---------- */
+  .tw { overflow-x:auto; border:1px solid rgba(255,216,0,.2); border-radius:10px; }
+  table { border-collapse:collapse; width:100%; font-size:12px; min-width:900px; }
+  th { position:sticky; top:0; background:#101632; color:#ffd800; text-align:left;
+    padding:7px 9px; border-bottom:1px solid rgba(255,216,0,.35); white-space:nowrap; }
+  td { padding:6px 9px; border-bottom:1px solid rgba(255,255,255,.06); vertical-align:top; }
+  tr:hover td { background:rgba(255,216,0,.05); }
+  td.num { text-align:right; white-space:nowrap; }
+  .pid { color:#6ad8ff; }
+  .in-game { color:#7be08a; } .out { color:#8a92a6; }
+  .r-yes { color:#7be08a; } .r-no { color:#ff6a5a; }
+  .seal-ch { letter-spacing:2px; }
+  /* ---------- ГРАФИКИ (CSS-бары) ---------- */
+  .chart { display:flex; flex-direction:column; gap:5px; background:#0b1022;
+    border:1px solid rgba(255,216,0,.2); border-radius:10px; padding:12px; }
+  .row { display:grid; grid-template-columns:190px 1fr 70px; gap:10px; align-items:center; font-size:12px; }
+  .row .lbl { color:#aab2c4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .track { background:#05060f; border-radius:4px; height:14px; overflow:hidden;
+    border:1px solid rgba(255,255,255,.07); }
+  .fill { height:100%; background:linear-gradient(90deg,#ff9a2a,#ffd800); }
+  .fill.c2 { background:linear-gradient(90deg,#4a58a4,#6ad8ff); }
+  .row .num { color:#ffd800; text-align:right; }
+  .cols2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:900px) { .cols2 { grid-template-columns:1fr; } }
+  .hint { color:#8a92a6; font-size:12px; margin:8px 0 14px; line-height:1.5; }
+  .empty { color:#8a92a6; padding:20px; text-align:center; }
+  .badge { display:inline-block; padding:1px 7px; border-radius:8px; font-size:11px;
+    border:1px solid rgba(255,216,0,.4); color:#ffd800; margin-left:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SUPER BOB <span class="sub">· админ-панель · метрики игроков</span></h1>
+  <div class="bar">
+    <label>Источник</label>
+    <select id="src">
+      <option value="supa">Supabase (все игроки)</option>
+      <option value="local">Локально (этот браузер)</option>
+    </select>
+    <label>Период</label>
+    <select id="range">
+      <option value="24h">24 часа</option>
+      <option value="7d">7 дней</option>
+      <option value="30d">30 дней</option>
+      <option value="all" selected>Всё время</option>
+    </select>
+    <label>Поиск игрока (ID)</label>
+    <input id="search" placeholder="первые символы ID…" style="width:190px">
+    <button id="refresh">Обновить</button>
+    <label class="chk"><input type="checkbox" id="auto" checked> автообновление</label>
+    <button id="csv">Экспорт CSV</button>
+    <span id="status">—</span>
+  </div>
+</header>
+
+<nav>
+  <button data-tab="ov" class="on">Обзор</button>
+  <button data-tab="se">Сессии</button>
+  <button data-tab="pl">Игроки</button>
+  <button data-tab="fu">Воронка уровней</button>
+  <button data-tab="ex">Причины ухода</button>
+  <button data-tab="ev">Журнал событий</button>
+</nav>
+
+<main>
+  <!-- ============ ОБЗОР ============ -->
+  <section id="ov" class="on">
+    <div class="kpis" id="kpis"></div>
+    <div class="cols2">
+      <div>
+        <h2>Возвратность игроков (retention)</h2>
+        <div class="hint">Доля игроков, вернувшихся в игру хотя бы один раз через N дней после первого визита.</div>
+        <div class="chart" id="ret"></div>
+      </div>
+      <div>
+        <h2>Активность по дням (сессий/день)</h2>
+        <div class="hint">Последние 14 дней: сколько сессий начиналось в каждый день.</div>
+        <div class="chart" id="dau"></div>
+      </div>
+    </div>
+    <h2>Последние сессии</h2>
+    <div class="tw"><table id="ovt"></table></div>
+  </section>
+
+  <!-- ============ СЕССИИ ============ -->
+  <section id="se">
+    <div class="hint">Каждая строка — визит игрока: <b>где остановился</b> (последний снимок),
+      <b>когда ушёл</b> и <b>вернулся ли</b> позже. Причины ухода: закрыл игру · ушёл из вкладки ·
+      бездействовал · обрыв (сессия не завершилась сама).</div>
+    <div class="tw"><table id="set"></table></div>
+  </section>
+
+  <!-- ============ ИГРОКИ ============ -->
+  <section id="pl">
+    <div class="hint">Агрегат по игрокам: первый/последний визит, число сессий и возвратов,
+      максимальный прогресс (уровень, печати), рекорды и средняя длина визита.</div>
+    <div class="tw"><table id="plt"></table></div>
+  </section>
+
+  <!-- ============ ВОРОНКА ============ -->
+  <section id="fu">
+    <div class="hint">На каких уровнях игроки останавливаются: слева — финальный уровень каждой
+      сессии (где бросили), справа — максимальный уровень, которого игрок достиг за всё время.</div>
+    <div class="cols2">
+      <div><h2>Где остановились сессии</h2><div class="chart" id="funStop"></div></div>
+      <div><h2>Максимальный прогресс игроков</h2><div class="chart" id="funMax"></div></div>
+    </div>
+    <h2>Арена: до какой волны доходят</h2>
+    <div class="chart" id="funWave"></div>
+  </section>
+
+  <!-- ============ УХОДЫ ============ -->
+  <section id="ex">
+    <div class="hint">Почему и когда игроки уходят из игры.</div>
+    <div class="chart" id="exChart"></div>
+    <h2>Средняя длина сессии по причинам</h2>
+    <div class="chart" id="exDur"></div>
+  </section>
+
+  <!-- ============ СОБЫТИЯ ============ -->
+  <section id="ev">
+    <div class="hint">Подробный журнал игровых событий: старты уровней, смерти, победы,
+      печати, покупки, кооп-комнаты, переходы экранов.</div>
+    <div class="bar" style="margin-bottom:10px">
+      <label>Тип события</label><select id="evKind"><option value="">все</option></select>
+      <label>Поиск в данных</label><input id="evSearch" placeholder="текст в JSON…" style="width:200px">
+    </div>
+    <div class="tw"><table id="evt"></table></div>
+  </section>
+</main>
+
+<script src="supabase-config.js"></script>
+<script>
+'use strict';
+/* ============================================================
+   АДМИН-ПАНЕЛЬ SUPER BOB: логика
+   ============================================================ */
+const $ = id => document.getElementById(id);
+const RU_DAYS = ['вс','пн','вт','ср','чт','пт','сб'];
+
+/* ---------- СОСТОЯНИЕ ---------- */
+let SESS = [];        // сессии: [{id,pid,n,is_return,started_at,ended_at,duration_s,exit_reason,snap…}]
+let EVTS = [];        // события: [{t,pid,sid,kind,p}]
+let srcMode = 'supa', rangeVal = 'all', searchVal = '';
+
+/* ---------- УТИЛИТЫ ---------- */
+function fmtDT(s) { if (!s) return '—';
+  const d = new Date(s); if (isNaN(d)) return '—';
+  return d.toLocaleDateString('ru-RU') + ' ' + d.toLocaleTimeString('ru-RU',
+    { hour:'2-digit', minute:'2-digit' }); }
+function fmtDay(s) { if (!s) return '—'; const d = new Date(s);
+  return d.toLocaleDateString('ru-RU', { day:'2-digit', month:'2-digit' }); }
+function fmtDur(sec) { if (sec == null) return '—'; sec = Math.max(0, sec | 0);
+  if (sec < 60) return sec + ' с';
+  const m = Math.floor(sec / 60), h = Math.floor(m / 60);
+  if (h > 0) return h + ' ч ' + (m % 60) + ' м'; return m + ' м ' + (sec % 60) + ' с'; }
+function fmtGap(sec) { if (sec == null) return '—';
+  if (sec < 3600) return Math.round(sec / 60) + ' мин';
+  if (sec < 86400) return (sec / 3600).toFixed(1) + ' ч';
+  return Math.round(sec / 86400) + ' дн'; }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g,
+  c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+function shortPid(p) { return p ? p.slice(0, 8) : '—'; }
+
+const STATE_RU = { title:'В меню', intro:'Интро истории', select:'Выбор уровня', shop:'Магазин',
+  about:'О игре', pause:'Пауза', play:'Игра', clear:'Уровень пройден', over:'Игра окончена',
+  arenaMenu:'Лобби арены', arena:'Арена', results:'Итоги', final:'Финал игры',
+  awaken:'Сюжет: пробуждение', gameover:'Игра окончена' };
+const EXIT_RU = { close:'Закрыл игру', tab_hidden:'Ушёл из вкладки', idle:'Бездействовал' };
+function exitRu(r) { return r ? (EXIT_RU[r] || r) : 'Обрыв (не завершилась)'; }
+function exitShort(r) { return r ? (EXIT_RU[r] || r) : 'обрыв'; }
+function sealsStr(s) { if (!s) return '—';
+  let out = ''; for (const ch of String(s)) out += ch === '1' ? '★' : '·'; return out || '—'; }
+
+/* «ГДЕ ОСТАНОВИЛСЯ» — человекочитаемая строка по снапшоту сессии */
+function whereCell(s) {
+  const p = s || {};
+  const parts = [];
+  let st = STATE_RU[p.state] || p.state || '—';
+  if (p.state === 'play' || p.state === 'clear' || p.state === 'over' || p.state === 'pause') {
+    st = 'Уровень ' + ((p.level_idx | 0) + 1);
+    if (p.level_name) st += ' «' + p.level_name + '»';
+    if (p.world != null && p.world_ru && p.world_ru !== p.level_name) st += ' · ' + p.world_ru;
+    if (p.pos_pct != null && p.state === 'play') st += ' · пройдено ~' + p.pos_pct + '%';
+  } else if (p.state === 'arena') { st = 'Арена · волна ' + (p.wave || 1); }
+  parts.push(st);
+  if (p.seals && /[1]/.test(p.seals)) parts.push('печати: ' + sealsStr(p.seals));
+  if (p.net_on) parts.push('кооп ' + (p.net_mode === 'host' ? 'хост' : 'гость') +
+    (p.net_code ? ' ' + esc(p.net_code) : ''));
+  return parts.join('<br>') || '—';
+}
+/* была ли сессия «сегодня/в живых» */
+function isLive(s) { return !s.ended_at; }
+
+/* ---------- ЗАГРУЗКА ДАННЫХ ---------- */
+function cfg() { try { return window.SUPABASE_CFG || {}; } catch (e) { return {}; } }
+function netOk() { const c = cfg(); return !!(c.url && c.key); }
+function dbBase() { const c = cfg(); return (c.dburl || c.url).replace(/\/+$/, '') + '/rest/v1/'; }
+function rangeISO() { const ms = { '24h': 24 * 3600e3, '7d': 7 * 86400e3, '30d': 30 * 86400e3 }[rangeVal];
+  return ms ? new Date(Date.now() - ms).toISOString() : null; }
+
+async function loadSupa() {
+  const c = cfg(); const base = dbBase();
+  const H = { apikey: c.key, Authorization: 'Bearer ' + c.key };
+  const from = rangeISO();
+  let sUrl = base + 'player_sessions?order=started_at.desc&limit=1000';
+  if (from) sUrl += '&started_at=gte.' + from;
+  let eUrl = base + 'player_events?order=created_at.desc&limit=2000';
+  if (from) eUrl += '&created_at=gte.' + from;
+  const [rs, re] = await Promise.all([
+    fetch(sUrl, { headers: H }).then(r => { if (!r.ok) throw new Error('sessions HTTP ' + r.status); return r.json(); }),
+    fetch(eUrl, { headers: H }).then(r => { if (!r.ok) throw new Error('events HTTP ' + r.status); return r.json(); })
+  ]);
+  SESS = (rs || []).map(r => Object.assign({}, r, { snap: r }));   // колонки = плоский снапшот
+  EVTS = (re || []).map(r => ({ t: r.created_at, pid: r.pid, sid: r.sid, kind: r.kind, p: r.payload || {} }));
+}
+function loadLocal() {
+  let hist = [], cur = null, evt = [];
+  try { hist = JSON.parse(localStorage.getItem('bob5_m_hist') || '[]'); } catch (e) {}
+  try { cur = JSON.parse(localStorage.getItem('bob5_m_sess') || 'null'); } catch (e) {}
+  try { evt = JSON.parse(localStorage.getItem('bob5_m_evt') || '[]'); } catch (e) {}
+  const from = rangeISO();
+  SESS = hist.filter(s => !from || new Date(s.started_at) >= new Date(from));
+  if (cur && (!from || new Date(cur.started_at) >= new Date(from))) SESS.push(cur);
+  SESS = SESS.map(s => Object.assign({}, s, { snap: Object.assign({}, s.snap || {}, s) }));
+  EVTS = evt.filter(e => !from || new Date(e.t) >= new Date(from));
+}
+async function reload() {
+  setStatus('Загрузка…', '');
+  try {
+    if (srcMode === 'supa') {
+      if (!netOk()) throw new Error('supabase-config.js не заполнен');
+      await loadSupa();
+      setStatus('<span class="ok">Supabase: ' + SESS.length + ' сессий, ' + EVTS.length + ' событий</span>', 'ok');
+    } else {
+      loadLocal();
+      setStatus('<span class="ok">Локально: ' + SESS.length + ' сессий, ' + EVTS.length + ' событий</span>', 'ok');
+    }
+  } catch (e) {
+    SESS = []; EVTS = [];
+    setStatus('<span class="err">' + esc(e.message || e) +
+      ' — проверьте, что схема (supabase-schema.sql) развёрнута, или включите «Локально»</span>', 'err');
+  }
+  render();
+}
+function setStatus(html, cls) { const el = $('status'); el.innerHTML = html; el.className = cls || ''; }
+
+/* ---------- ФИЛЬТРЫ ---------- */
+function filtSessions() {
+  const s = searchVal.toLowerCase();
+  return SESS.filter(x => !s || String(x.pid).toLowerCase().startsWith(s));
+}
+function filtEvents() { return EVTS; }
+
+/* ---------- АГРЕГАТЫ ---------- */
+function groupBy(arr, key) { const m = new Map();
+  for (const x of arr) { const k = key(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); }
+  return m; }
+function daysAgo(n) { const d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate() - n); return d; }
+function playersOf(sess) { return groupBy(sess, s => s.pid); }
+/* сессии, отсортированные по времени — чтобы определить возвраты */
+function withReturns(sess) {
+  const byP = playersOf(sess);
+  const out = new Map();                                     // id → {returned, gap_s}
+  for (const [, list] of byP) {
+    const sorted = list.slice().sort((a, b) => new Date(a.started_at) - new Date(b.started_at));
+    for (let i = 0; i < sorted.length; i++) {
+      const cur = sorted[i], next = sorted[i + 1] || null;
+      if (next) { const gap = (new Date(next.started_at) - new Date(cur.ended_at || cur.started_at)) / 1000;
+        out.set(cur.id, { returned: true, gap_s: Math.max(0, gap | 0) }); }
+      else out.set(cur.id, { returned: false, gap_s: null });
+    }
+  }
+  return out;
+}
+/* retention D1/D7/D30: игрок вернулся на N-й день после первого визита */
+function retention(sess) {
+  const byP = playersOf(sess);
+  const res = { 1: [0, 0], 7: [0, 0], 30: [0, 0] };          // [вернувшихся, всего]
+  for (const [, list] of byP) {
+    const starts = list.map(s => new Date(s.started_at).getTime());
+    const first = Math.min.apply(null, starts);
+    const firstDay = new Date(first); firstDay.setHours(0,0,0,0);
+    for (const k of [1, 7, 30]) {
+      res[k][1]++;
+      const target = firstDay.getTime() + k * 86400e3;
+      if (starts.some(t => t >= target && t < target + 86400e3)) res[k][0]++;
+    }
+  }
+  return res;
+}
+
+/* ---------- РЕНДЕР: KPI ОБЗОР ---------- */
+function kpi(v, t) { return '<div class="kpi"><div class="v">' + v + '</div><div class="t">' + t + '</div></div>'; }
+function renderOverview(f) {
+  const retMap = withReturns(f);
+  const returned = f.filter(s => retMap.get(s.id) && retMap.get(s.id).returned).length;
+  const live = f.filter(isLive).length;
+  const durs = f.filter(s => s.duration_s != null).map(s => s.duration_s | 0);
+  const avg = durs.length ? Math.round(durs.reduce((a, b) => a + b, 0) / durs.length) : null;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const todayN = f.filter(s => new Date(s.started_at) >= today).length;
+  /* средний DAU за 7 дней */
+  let dau7 = 0;
+  for (let d = 1; d <= 7; d++) { const a = daysAgo(d), b = daysAgo(d - 1);
+    dau7 += f.filter(s => { const t = new Date(s.started_at); return t >= a && t < b; }).length ? 1 : 0; }
+  const dauAvg = dau7 ? '≥' + dau7 + '/7' : '—';
+  $('kpis').innerHTML = [
+    kpi(new Set(f.map(s => s.pid)).size, 'игроков за период'),
+    kpi(f.length, 'сессий за период'),
+    kpi(f.length ? Math.round(returned / f.length * 100) + '%' : '—',
+      'сессий с возвратом позже'),
+    kpi(fmtDur(avg), 'средняя длина сессии'),
+    kpi(todayN, 'сессий сегодня'),
+    kpi(live, 'сессий без завершения<br>(сейчас в игре / обрывы)'),
+    kpi(dauAvg, 'дней с активностью<br>за последние 7 дней')
+  ].join('');
+  /* retention */
+  const ret = retention(f);
+  $('ret').innerHTML = [1, 7, 30].map(k => {
+    const [r, tot] = ret[k]; const pct = tot ? Math.round(r / tot * 100) : 0;
+    return '<div class="row"><div class="lbl">День ' + k + '</div>' +
+      '<div class="track"><div class="fill c2" style="width:' + pct + '%"></div></div>' +
+      '<div class="num">' + pct + '%</div></div>'; }).join('');
+  /* DAU-бары: 14 дней */
+  const maxD = Math.max(1, ...Array.from({ length: 14 }, (_, i) => {
+    const a = daysAgo(13 - i), b = daysAgo(12 - i);
+    return f.filter(s => { const t = new Date(s.started_at); return t >= a && t < b; }).length; }));
+  $('dau').innerHTML = Array.from({ length: 14 }, (_, i) => {
+    const a = daysAgo(13 - i), b = daysAgo(12 - i);
+    const n = f.filter(s => { const t = new Date(s.started_at); return t >= a && t < b; }).length;
+    const lbl = fmtDay(a.toISOString());
+    return '<div class="row"><div class="lbl">' + lbl + '</div>' +
+      '<div class="track"><div class="fill" style="width:' + Math.round(n / maxD * 100) + '%"></div></div>' +
+      '<div class="num">' + n + '</div></div>'; }).join('');
+  /* последние 8 сессий — той же таблицей, что на вкладке */
+  $('ovt').innerHTML = sessTableHtml(f.slice().sort((a, b) =>
+    new Date(b.started_at) - new Date(a.started_at)).slice(0, 8), retMap, true);
+}
+
+/* ---------- РЕНДЕР: ТАБЛИЦА СЕССИЙ (общая для Обзор/Сессии) ---------- */
+function sessTableHtml(list, retMap, compact) {
+  const head = '<tr><th>Игрок</th><th>Начало</th><th>Ушёл</th><th>Длилась</th>' +
+    '<th>Где остановился</th><th>Прогресс</th><th class="num">Счёт</th><th class="num">Монеты</th>' +
+    (compact ? '' : '<th>Причина ухода</th>') + '<th>Вернулся?</th></tr>';
+  if (!list.length) return head + '<tr><td colspan="10" class="empty">Пока нет данных — запустите игру и поиграйте несколько минут.</td></tr>';
+  const rows = list.map(s => {
+    const p = s.snap || s;
+    const ret = retMap.get(s.id) || { returned: false, gap_s: null };
+    const retHtml = isLive(s) ? '<span class="in-game">в игре</span>' :
+      (ret.returned ? '<span class="r-yes">да · через ' + fmtGap(ret.gap_s) + '</span>'
+                    : '<span class="r-no">нет</span>');
+    return '<tr><td class="pid" title="' + esc(s.pid) + '">' + shortPid(s.pid) +
+      (s.is_return ? '<span class="badge">возврат</span>' : '') + '</td>' +
+      '<td>' + fmtDT(s.started_at) + '</td>' +
+      '<td>' + (s.ended_at ? fmtDT(s.ended_at) : '<span class="in-game">сейчас</span>') + '</td>' +
+      '<td>' + fmtDur(s.duration_s) + '</td>' +
+      '<td>' + whereCell(p) + '</td>' +
+      '<td>мир ' + ((p.world || Math.floor((p.level_idx | 0) / 10) + 1) || '—') +
+        '<br>печати <span class="seal-ch">' + sealsStr(p.seals) + '</span>' +
+        (p.state === 'arena' ? '<br>волна ' + (p.wave || 1) : '') + '</td>' +
+      '<td class="num">' + (p.score | 0) + '</td>' +
+      '<td class="num">' + (p.coins | 0) + '</td>' +
+      (compact ? '' : '<td>' + exitRu(p.exit_reason || s.exit_reason) + '</td>') +
+      '<td>' + retHtml + '</td></tr>';
+  }).join('');
+  return head + rows;
+}
+function renderSessions(f) {
+  const retMap = withReturns(f);
+  const list = f.slice().sort((a, b) => new Date(b.started_at) - new Date(a.started_at)).slice(0, 400);
+  $('set').innerHTML = sessTableHtml(list, retMap, false);
+}
+
+/* ---------- РЕНДЕР: ИГРОКИ ---------- */
+function renderPlayers(f) {
+  const byP = playersOf(f);
+  const rows = [];
+  for (const [pid, list] of byP) {
+    const starts = list.map(s => new Date(s.started_at).getTime());
+    const ends = list.filter(s => s.ended_at).map(s => new Date(s.ended_at).getTime());
+    const first = new Date(Math.min.apply(null, starts));
+    const last = ends.length ? new Date(Math.max.apply(null, ends)) : null;
+    const returns = list.filter(s => s.is_return).length;
+    const maxLv = Math.max.apply(null, list.map(s => ((s.snap && s.snap.level_idx) | 0) + 1));
+    let bestSeals = '';
+    for (const s of list) { const ss = (s.snap && s.snap.seals) || '';
+      if (ss.split('').filter(c => c === '1').length > bestSeals.split('').filter(c => c === '1').length) bestSeals = ss; }
+    const maxScore = Math.max.apply(null, list.map(s => (s.snap && s.snap.score) | 0));
+    const durs = list.filter(s => s.duration_s != null).map(s => s.duration_s | 0);
+    const avg = durs.length ? fmtDur(Math.round(durs.reduce((a, b) => a + b, 0) / durs.length)) : '—';
+    const live = list.some(isLive);
+    rows.push({ pid, first, last, n: list.length, returns, maxLv, bestSeals, maxScore, avg, live });
+  }
+  rows.sort((a, b) => (b.last ? b.last.getTime() : 0) - (a.last ? a.last.getTime() : 0));
+  const head = '<tr><th>Игрок (ID)</th><th>Первый визит</th><th>Последний визит</th>' +
+    '<th class="num">Сессий</th><th class="num">Возвратов</th><th class="num">Макс. уровень</th>' +
+    '<th>Печати</th><th class="num">Макс. счёт</th><th>Средняя сессия</th><th>Статус</th></tr>';
+  const body = rows.length ? rows.map(r =>
+    '<tr><td class="pid" title="' + esc(r.pid) + '">' + shortPid(r.pid) + '</td>' +
+    '<td>' + fmtDT(r.first.toISOString()) + '</td>' +
+    '<td>' + (r.last ? fmtDT(r.last.toISOString()) : '—') + '</td>' +
+    '<td class="num">' + r.n + '</td><td class="num">' + r.returns + '</td>' +
+    '<td class="num">' + r.maxLv + ' / 60</td>' +
+    '<td class="seal-ch">' + sealsStr(r.bestSeals) + '</td>' +
+    '<td class="num">' + r.maxScore + '</td><td>' + r.avg + '</td>' +
+    '<td>' + (r.live ? '<span class="in-game">в игре</span>' : '<span class="out">офлайн</span>') + '</td></tr>').join('')
+    : '<tr><td colspan="10" class="empty">Пока нет игроков за этот период.</td></tr>';
+  $('plt').innerHTML = head + body;
+}
+
+/* ---------- РЕНДЕР: ВОРОНКА ---------- */
+function chartBars(el, map, fmtLbl, colorCls) {
+  const arr = Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 24);
+  const max = Math.max(1, ...arr.map(x => x[1]));
+  $(el).innerHTML = arr.length ? arr.map(([k, v]) =>
+    '<div class="row"><div class="lbl" title="' + esc(fmtLbl(k)) + '">' + esc(fmtLbl(k)) + '</div>' +
+    '<div class="track"><div class="fill ' + (colorCls || '') + '" style="width:' +
+    Math.round(v / max * 100) + '%"></div></div><div class="num">' + v + '</div></div>').join('')
+    : '<div class="empty">Нет данных.</div>';
+}
+function renderFunnel(f) {
+  /* где остановились сессии: по финальному уровню каждой сессии (только игровые состояния) */
+  const stopMap = new Map();
+  for (const s of f) { const p = s.snap || s;
+    if (!['play', 'clear', 'over', 'pause'].includes(p.state)) continue;
+    const k = (p.level_idx | 0) + 1; stopMap.set(k, (stopMap.get(k) || 0) + 1); }
+  chartBars('funStop', stopMap, k => 'Уровень ' + k + ' (мир ' + (Math.floor((k - 1) / 10) + 1) + ')');
+  /* максимальный уровень игрока */
+  const maxMap = new Map();
+  for (const [, list] of playersOf(f)) {
+    const mx = Math.max.apply(null, list.map(s => ((s.snap && s.snap.level_idx) | 0) + 1));
+    maxMap.set(mx, (maxMap.get(mx) || 0) + 1); }
+  chartBars('funMax', maxMap, k => 'Дошёл до уровня ' + k, 'c2');
+  /* арена: волны */
+  const wMap = new Map();
+  for (const s of f) { const p = s.snap || s;
+    if (p.state !== 'arena') continue; const w = p.wave | 0 || 1;
+    wMap.set(w, (wMap.get(w) || 0) + 1); }
+  chartBars('funWave', wMap, w => 'Волна ' + w, 'c2');
+}
+
+/* ---------- РЕНДЕР: УХОДЫ ---------- */
+function renderExits(f) {
+  const cnt = new Map(), dur = new Map();
+  for (const s of f) { const k = s.exit_reason || '';
+    cnt.set(k, (cnt.get(k) || 0) + 1);
+    if (s.duration_s != null) { if (!dur.has(k)) dur.set(k, []); dur.get(k).push(s.duration_s | 0); } }
+  chartBars('exChart', cnt, k => exitRu(k));
+  const durMap = new Map();
+  for (const [k, arr] of dur) durMap.set(k, Math.round(arr.reduce((a, b) => a + b, 0) / arr.length));
+  chartBars('exDur', durMap, k => exitRu(k));
+}
+
+/* ---------- РЕНДЕР: СОБЫТИЯ ---------- */
+function renderEvents(f) {
+  const kinds = Array.from(new Set(EVTS.map(e => e.kind))).sort();
+  const sel = $('evKind'), cur = sel.value;
+  sel.innerHTML = '<option value="">все</option>' + kinds.map(k => '<option' +
+    (k === cur ? ' selected' : '') + '>' + k + '</option>').join('');
+  const kf = sel.value, q = $('evSearch').value.toLowerCase();
+  let list = f;
+  if (kf) list = list.filter(e => e.kind === kf);
+  if (q) list = list.filter(e => JSON.stringify(e.p || {}).toLowerCase().includes(q));
+  list = list.slice().sort((a, b) => new Date(b.t) - new Date(a.t)).slice(0, 500);
+  const head = '<tr><th>Время</th><th>Тип</th><th>Игрок</th><th>Сессия</th><th>Данные</th></tr>';
+  const KIND_RU = { session_start:'Старт сессии', session_end:'Конец сессии', state:'Экран',
+    level_load:'Загрузка уровня', level_start:'Начат уровень', level_clear:'Уровень пройден',
+    death:'Смерть', gameover:'Игра окончена', seal_get:'Печать получена',
+    arena_start:'Арена: старт', arena_end:'Арена: итог', arena_exit:'Арена: выход',
+    shop_buy:'Покупка', coop:'Кооп-комната' };
+  const body = list.length ? list.map(e => '<tr><td>' + fmtDT(e.t) + '</td>' +
+    '<td>' + (KIND_RU[e.kind] || esc(e.kind)) + '</td>' +
+    '<td class="pid">' + shortPid(e.pid) + '</td>' +
+    '<td class="out">' + (e.sid ? e.sid.slice(0, 8) : '—') + '</td>' +
+    '<td style="max-width:460px; word-break:break-all">' + esc(JSON.stringify(e.p || {})) + '</td></tr>').join('')
+    : '<tr><td colspan="5" class="empty">Событий не найдено.</td></tr>';
+  $('evt').innerHTML = head + body;
+}
+
+/* ---------- CSV ЭКСПОРТ ---------- */
+function csv() {
+  const f = filtSessions();
+  const retMap = withReturns(f);
+  const rows = [['pid', 'сессия#', 'возврат', 'начало', 'ушёл', 'длина_сек', 'причина_ухода',
+    'состояние', 'уровень', 'уровень_название', 'мир', 'позиция_%', 'счёт', 'монеты',
+    'жизни', 'печати', 'волна', 'смерти', 'вернулся', 'через_сек']];
+  for (const s of f.slice().sort((a, b) => new Date(a.started_at) - new Date(b.started_at))) {
+    const p = s.snap || s; const r = retMap.get(s.id) || {};
+    rows.push([s.pid, s.n, s.is_return ? 'да' : 'нет', s.started_at, s.ended_at || '',
+      s.duration_s == null ? '' : s.duration_s, s.exit_reason || 'обрыв', p.state || '',
+      (p.level_idx | 0) + 1, p.level_name || '', p.world || '', p.pos_pct == null ? '' : p.pos_pct,
+      p.score | 0, p.coins | 0, p.lives == null ? '' : p.lives, p.seals || '',
+      p.wave == null ? '' : p.wave, p.deaths | 0,
+      r.returned ? 'да' : 'нет', r.gap_s == null ? '' : r.gap_s]);
+  }
+  const csvText = '\uFEFF' + rows.map(r => r.map(v =>
+    '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"').join(';')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csvText], { type: 'text/csv;charset=utf-8' }));
+  a.download = 'superbob_sessions_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+/* ---------- ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК И ЗАПУСК ---------- */
+let curTab = 'ov';
+function render() {
+  const f = filtSessions();
+  renderOverview(f);
+  renderSessions(f);
+  renderPlayers(f);
+  renderFunnel(f);
+  renderExits(f);
+  renderEvents(filtEvents());
+}
+function tab(name) {
+  curTab = name;
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === name));
+}
+document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => tab(b.dataset.tab)));
+$('src').addEventListener('change', e => { srcMode = e.target.value; reload(); });
+$('range').addEventListener('change', e => { rangeVal = e.target.value; reload(); });
+$('search').addEventListener('input', e => { searchVal = e.target.value.trim(); render(); });
+$('refresh').addEventListener('click', reload);
+$('csv').addEventListener('click', csv);
+$('evKind').addEventListener('change', render);
+$('evSearch').addEventListener('input', render);
+$('auto').addEventListener('change', e => {
+  if (e.target.checked) autoT = setInterval(reload, 20000);
+  else { clearInterval(autoT); autoT = null; } });
+let autoT = setInterval(reload, 20000);
+reload();
+</script>
+</body>
+</html>

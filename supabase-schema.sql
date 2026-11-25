@@ -93,3 +93,103 @@ $$ language plpgsql;
 drop trigger if exists rooms_touch_trg on public.rooms;
 create trigger rooms_touch_trg before update on public.rooms
   for each row execute function public.rooms_touch();
+
+-- ============================================================================
+-- ТЕЛЕМЕТРИЯ ИГРОКОВ (metrics.js → admin.html): где игрок остановился,
+-- когда ушёл, вернулся ли. Пишется клиентом игры, читается админ-панелью.
+-- УСТАНОВКА: выполнить весь файл целиком (блоки ниже идемпотентны).
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- player_sessions: одна строка = один визит игрока. Снапшот-поля обновляются
+-- при каждом heartbeat (upsert по PK id) — в итоге там состояние НА МОМЕНТ
+-- УХОДА: экран, уровень/мир/название, позиция в уровне %, печати, счёт,
+-- монеты, жизни, волна арены, смерти, кооп-комната.
+-- ----------------------------------------------------------------------------
+create table if not exists public.player_sessions (
+  id           uuid primary key,                   -- UUID сессии (генерит игра)
+  pid          text not null,                      -- анонимный ID игрока (24 hex)
+  n            int  not null default 1,            -- номер сессии игрока (1, 2, 3…)
+  is_return    boolean not null default false,     -- это возврат (есть прошлые визиты)?
+  since_prev_s bigint,                             -- секунд с прошлого визита
+  started_at   timestamptz not null default now(),
+  ended_at     timestamptz,                        -- когда ушёл (null = не завершилась)
+  duration_s   int,                                -- длина визита, сек
+  exit_reason  text,                               -- close | tab_hidden | idle (null = обрыв)
+  state        text,                               -- экран: play / title / arena / …
+  level_idx    int,                                -- уровень (с нуля) на момент ухода
+  level_name   text,                               -- название уровня (из карты)
+  world        int,                                -- мир 1..6
+  pos_pct      int,                                -- позиция в уровне, %
+  score        int not null default 0,
+  coins        int not null default 0,
+  lives        int,
+  seals        text,                               -- «10100» — какие печати собраны
+  wave         int,                                -- арена: волна
+  deaths       int not null default 0,             -- смертей в текущем уровне
+  time_left    int,                                -- осталось времени на уровне, сек
+  ua           text,                               -- краткая подпись устройства
+  ver          int  not null default 1,            -- версия формата телеметрии
+  updated_at   timestamptz not null default now()
+);
+create index if not exists psess_pid_idx   on public.player_sessions (pid, started_at desc);
+create index if not exists psess_start_idx on public.player_sessions (started_at desc);
+create index if not exists psess_state_idx on public.player_sessions (state, started_at desc);
+
+-- ----------------------------------------------------------------------------
+-- player_events: журнал игровых событий (старт уровня, смерть, победа, печать,
+-- покупка, кооп-комната, смена экрана, старт/конец сессии). Пишется пачками.
+-- ----------------------------------------------------------------------------
+create table if not exists public.player_events (
+  id         bigint generated always as identity primary key,
+  pid        text not null,
+  sid        uuid,                                  -- ссылка на сессию (nullable)
+  kind       text not null,                         -- session_start / level_clear / death / …
+  payload    jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+create index if not exists pevent_pid_idx  on public.player_events (pid, created_at desc);
+create index if not exists pevent_kind_idx on public.player_events (kind, created_at desc);
+create index if not exists pevent_sid_idx  on public.player_events (sid);
+
+-- ----------------------------------------------------------------------------
+-- updated_at сессии тикает сам при каждом upsert (heartbeat обновляет строку) —
+-- по нему админка видит «сейчас в игре» даже без ended_at.
+-- ----------------------------------------------------------------------------
+create or replace function public.psess_touch() returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists psess_touch_trg on public.player_sessions;
+create trigger psess_touch_trg before update on public.player_sessions
+  for each row execute function public.psess_touch();
+
+-- ----------------------------------------------------------------------------
+-- RLS: как у комнат — анонимный вход в проекте выключен, секретов в таблицах
+-- нет (случайные ID, уровни и счёт). Кто знает публичный ключ — тот и пишет;
+-- админ-панель читает тем же ключом (открытым по дизайну проекта).
+-- ----------------------------------------------------------------------------
+alter table public.player_sessions enable row level security;
+alter table public.player_events   enable row level security;
+
+drop policy if exists "metrics public play" on public.player_sessions;
+drop policy if exists "metrics public play" on public.player_events;
+create policy "metrics public play" on public.player_sessions
+  for all to anon using (true) with check (true);
+create policy "metrics public play" on public.player_events
+  for all to anon using (true) with check (true);
+
+-- ----------------------------------------------------------------------------
+-- ХОЧЕТСЯ СТРОЖЕ (админ только по логину):
+-- 1) Authentication → включите провайдера (например, Email);
+-- 2) замените обе политики на чтение только для authenticated:
+--    create policy "metrics read admin" on public.player_sessions
+--      for select to authenticated using (true);
+--    create policy "metrics write game" on public.player_sessions
+--      for insert to anon with check (true);
+--    (и аналогично для player_events; update сессий — только authenticated);
+-- 3) админ-панель вызовет supabase.auth.signInWithPassword() перед чтением.
+-- ----------------------------------------------------------------------------
