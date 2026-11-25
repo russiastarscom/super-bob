@@ -13,8 +13,8 @@ window.SUPABASE_CFG = {
 
 /* ---------- ТЕЛЕМЕТРИЯ: подгружаем metrics.js сразу после конфига ----------
    Асинхронно — игру не задерживает; сам index.html НЕ меняется.
-   Сбор метрик живёт в metrics.js, просмотр — в admin.html (кнопка
-   «АДМИН» на титульном экране появляется из metrics.js). */
+   Сбор метрик живёт в metrics.js, просмотр — в admin.html (отдельный
+   файл под паролем, открывается по прямой ссылке …/admin.html). */
 (function () {
   try {
     var s = document.createElement('script');

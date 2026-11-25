@@ -23,11 +23,16 @@
         работать, всё копится локально (та же философия, что у коопа).
    АНОНИМНОСТЬ: ни логинов, ни паролей — только случайный ID
    игрока (bob5_pid), который живёт в localStorage устройства.
-   КНОПКА «АДМИН»: метрики добавляют на титульный экран маленькую
-   HTML-кнопку (под «О ИГРЕ») — открывает admin.html в новой вкладке.
+   ПАНЕЛЬ АДМИНА: admin.html отдельным файлом и ПОД ПАРОЛЕМ,
+   открывается только по прямой ссылке (…/admin.html). Кнопки «АДМИН»
+   внутри игры больше нет — игроки панель вообще не видят. Сама панель
+   метрики не пишет (admin.html отфильтровывается в начале файла).
    ============================================================ */
 window.Metrics = (function () {
   'use strict';
+
+  /* админ-панель (admin.html) метрики не пишет: она не игрок */
+  try { if (/(^|\/)admin\.html$/i.test(location.pathname)) return null; } catch (e) {}
 
   /* ---------- КОНФИГУРАЦИЯ (все числа — только здесь) ---------- */
   const VER       = 1;             // версия формата (для будущих миграций)
@@ -355,33 +360,6 @@ window.Metrics = (function () {
     setTimeout(() => waitGame(fn, tries + 1), 50);
   }
 
-  /* ---------- КНОПКА «АДМИН» НА ТИТУЛЬНОМ ЭКРАНЕ ----------
-     Маленькая HTML-кнопка поверх канваса: та же геометрия, что у
-     «О ИГРЕ» (внутренние координаты 8..72 × 34..54 из 512×288),
-     видна только в главном меню. Открывает admin.html. */
-  function injectAdminBtn() {
-    if (!document.body || document.getElementById('bob5_admin_btn')) return;
-    const b = document.createElement('button');
-    b.id = 'bob5_admin_btn';
-    b.textContent = 'АДМИН';
-    b.title = 'Метрики игроков — admin.html';
-    b.setAttribute('style',
-      'position:fixed;left:1.25%;top:11.8%;width:10%;min-width:72px;height:6.9%;min-height:24px;' +
-      'z-index:6;display:none;background:rgba(6,10,24,.8);color:#6ad8ff;cursor:pointer;' +
-      'border:1px solid rgba(106,216,255,.5);border-radius:6px;font:bold clamp(11px,2.6vh,16px) ' +
-      '"Courier New",monospace;letter-spacing:.12em;-webkit-tap-highlight-color:transparent;' +
-      'padding:0;box-shadow:0 2px 8px rgba(0,0,0,.45)');
-    b.addEventListener('pointerup', e => { e.stopPropagation();
-      try { window.open('admin.html', '_blank'); } catch (e2) {} });
-    b.addEventListener('pointerdown', e => e.stopPropagation());   // тап не идёт в игру
-    document.body.appendChild(b);
-    setInterval(() => {                             // видна только в меню титула
-      try { const g = window.__G, s = g && g.G && g.G.state;
-        b.style.display = (s === 'title' && !document.getElementById('splash')) ? 'block' : 'none';
-      } catch (e) { b.style.display = 'none'; }
-    }, 500);
-  }
-
   /* ---------- АКТИВНОСТЬ: любые нажатия/тапы = игрок жив ---------- */
   function markAct() { lastAct = now();
     if (ended) resume();                          // вернулся после finalize
@@ -421,10 +399,6 @@ window.Metrics = (function () {
   setInterval(pollGame, POLL * 1000);
   setInterval(tick, HEARTBEAT * 1000);
   setInterval(() => { if (!ended) flushNow(false); }, FLUSH * 1000);
-  (function waitBody() {                            // кнопка — когда есть тело страницы
-    if (document.body) injectAdminBtn();
-    else setTimeout(waitBody, 200);
-  })();
   window.Metrics = M;                 // для консоли и будущих прямых хуков
   return M;
 })();
