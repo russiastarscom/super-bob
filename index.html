@@ -3090,14 +3090,29 @@ function drawEnemy(e) {
 function drawCorpse(c) {
   const dx = c.x - camX, dy = c.y;
   if (c.t > 6 && Math.floor(c.t*8)%2) return;              // мигает перед исчезновением
-  const COLS = { crawler:'#7a9a3a', shielder:'#8a8a98', shade:'#8a6ac8', fish:'#5a9ad8',
-                 puffer:'#d8a04a', bird:'#d8d8e8', hopper:'#4aa84a', spitter:'#c85a4a' };
-  cv2.fillStyle = 'rgba(0,0,0,.28)'; cv2.fillRect(dx+1, dy+c.h-2, 12, 2);   // тень-лужица
+  // труп ТОГО, кого убил: сплющенный настоящий спрайт врага
+  const img = { crawler: SPR.crw1, shielder: SPR.shield, shade: SPR.bat1, fish: SPR.fsh1,
+                puffer: SPR.puf, bird: SPR.brd1 }[c.kind];
+  cv2.fillStyle = 'rgba(0,0,0,.28)'; cv2.fillRect(dx+1, dy+c.h-2, 12, 2);   // лужица-тень
   cv2.fillStyle = 'rgba(10,12,20,.5)'; cv2.fillRect(dx-1, dy+1, 16, 7);     // тёмный контур — видно на любой земле
-  cv2.fillStyle = COLS[c.kind] || '#9a9a9a';
-  cv2.fillRect(dx, dy+2, 14, 5);                            // сплющенное тело
-  cv2.fillStyle = 'rgba(255,255,255,.35)'; cv2.fillRect(dx+2, dy+2, 10, 1);
-  cv2.fillStyle = '#ffd800'; cv2.fillRect(dx + (c.dir>0 ? 10 : 1), dy+3, 3, 3);  // глаз
+  if (img) {
+    cv2.save();
+    cv2.translate(c.dir > 0 ? dx + 14 : dx, dy + 1);       // лежит так, как бежал
+    cv2.scale(c.dir > 0 ? 1 : -1, 1);
+    cv2.drawImage(img, 0, 0, 14, 6);                       // сплющенное тело врага
+    cv2.restore();
+    cv2.fillStyle = 'rgba(255,255,255,.3)'; cv2.fillRect(dx+2, dy+2, 10, 1);
+    cv2.fillStyle = '#ffd800';                             // погасший глаз
+    cv2.fillRect(dx + (c.dir > 0 ? 10 : 2), dy+3, 2, 2);
+  } else if (c.kind === 'hopper') {                        // прыгун: зелёная лягушка на боку
+    cv2.fillStyle = '#2e7a2e'; cv2.fillRect(dx, dy+2, 14, 5);
+    cv2.fillStyle = '#4aa84a'; cv2.fillRect(dx+1, dy+2, 12, 3);
+    cv2.fillStyle = '#ffd800'; cv2.fillRect(dx + (c.dir > 0 ? 9 : 3), dy+3, 3, 3);
+  } else {                                                 // плевун: бутон на боку со стеблем
+    cv2.fillStyle = '#3a7a3a'; cv2.fillRect(dx, dy+4, 14, 3);
+    cv2.fillStyle = '#c85a4a'; cv2.fillRect(dx+2, dy+2, 11, 5);
+    cv2.fillStyle = '#ffd800'; cv2.fillRect(dx+4, dy+3, 2, 2); cv2.fillRect(dx+9, dy+3, 2, 2);
+  }
 }
 function drawBoss(e, dx, dy) {
   if (e.dead==='flip') { cv2.save(); cv2.translate(dx+e.w/2, dy+e.h/2); cv2.scale(1,-1);
@@ -3175,9 +3190,9 @@ function drawHUD() {
   const ty = 6 + T;
   setFont(9);
   const mw = s => cv2.measureText(s).width;
-  // ── левый кластер: счёт → монеты → ключ → таймер звезды
+  // ── левый кластер: счёт → БАЛАНС копилки → ключ → таймер звезды
   const sTxt = `СЧЁТ ${String(G.score).padStart(6,'0')}`;
-  const cTxt = `×${String(G.coins).padStart(2,'0')}`;
+  const cTxt = `×${String(Bank.coins()).padStart(2,'0')}`;   // тот же баланс, что в магазине и меню
   let lx = 18 + Lm;                      // отступ от края: скругления экрана не режут счёт
   txt(sTxt, lx, ty, 9); lx += mw(sTxt) + 14;
   cv2.drawImage(SPR.coin0, lx, ty-2); lx += 13;
@@ -5062,14 +5077,14 @@ function renderClear() {
     const wi = worldOf(G.level);
     txt(wi >= 6 ? `ОСКОЛОК ${EPIL_SHARDS_RU[wi-6]} ТВОЙ!`
                 : `ПЕЧАТЬ ${SEALS_RU[wi]} ТВОЯ!`, CFG.VW/2, 158, 12, '#6ad8ff', 'center');
-    txt(`СЧЁТ: ${String(G.score).padStart(6,'0')}   МОНЕТЫ: ${G.coins}`, CFG.VW/2, 182, 10, '#fff', 'center');
+    txt(`СЧЁТ: ${String(G.score).padStart(6,'0')}   МОНЕТЫ: +${Math.max(0, G.coins - (G.lvlCoins0 || 0))} · КОПИЛКА: ${Bank.coins()}`, CFG.VW/2, 182, 10, '#fff', 'center');
     if (wi < 5 && G.seals.filter(Boolean).length === 5)
       txt('Все пять печатей собраны... Разлом зовёт.', CFG.VW/2, 204, 9, 'rgba(255,160,140,.9)', 'center');
     else if (wi >= 6)
       txt('Осколок дрожит в лучах... Звезда ждёт свою пару.', CFG.VW/2, 204, 9, 'rgba(150,230,255,.9)', 'center');
   } else {
     txt('УРОВЕНЬ ПРОЙДЕН!', CFG.VW/2, 70, 22, '#ffd800', 'center');
-    txt(`СЧЁТ: ${String(G.score).padStart(6,'0')}   МОНЕТЫ: ${G.coins}`, CFG.VW/2, 130, 11, '#fff', 'center');
+    txt(`СЧЁТ: ${String(G.score).padStart(6,'0')}   МОНЕТЫ: +${Math.max(0, G.coins - (G.lvlCoins0 || 0))} · КОПИЛКА: ${Bank.coins()}`, CFG.VW/2, 130, 11, '#fff', 'center');
     txt(`${worldName(G.level)} — путь открыт`, CFG.VW/2, 152, 10, 'rgba(255,255,255,.85)', 'center');
   }
   if (Math.floor(uiTime*2)%2) txt('ENTER — дальше', CFG.VW/2, 232, 10, '#fff', 'center');
@@ -5094,6 +5109,7 @@ function renderOver() {
   txt('ИГРА ОКОНЧЕНА', CFG.VW/2, 84, 26, '#ff5a5a', 'center');
   txt('Культ торжествует... но легенды не умирают.', CFG.VW/2, 124, 10, 'rgba(255,255,255,.75)', 'center');
   txt(`СЧЁТ: ${String(G.score).padStart(6,'0')}   ПЕЧАТИ: ${G.seals.filter(Boolean).length}/5`, CFG.VW/2, 150, 11, '#fff', 'center');
+  txt(`В КОПИЛКЕ: ${Bank.coins()} монет — собранное сохранено`, CFG.VW/2, 168, 9, 'rgba(255,216,0,.9)', 'center');
   const hasSave = !!Save.data();
   if (Math.floor(uiTime*2)%2)
     txt(hasSave ? 'ENTER — продолжить с сохранения' : 'ENTER — попробовать снова', CFG.VW/2, 196, 11, '#ffd800', 'center');
@@ -5117,7 +5133,7 @@ function renderFinal() {
   const pg = STORY.final[Math.min(renderFinal.pg|0, STORY.final.length-1)];
   wrap(revealed(pg, G.revT), 60, 136, CFG.VW-120, 12, 9, '#fff');
   if (Math.floor(uiTime*2)%2) txt('ENTER — дальше', CFG.VW/2, 200, 9, 'rgba(255,255,255,.85)', 'center');
-  txt(`ИТОГ: ${String(G.score).padStart(6,'0')} очков · МОНЕТЫ: ${G.coins} · 5/5 печатей`, CFG.VW/2, 250, 9, '#ffd800', 'center');
+  txt(`ИТОГ: ${String(G.score).padStart(6,'0')} очков · В КОПИЛКЕ: ${Bank.coins()} · 5/5 печатей`, CFG.VW/2, 250, 9, '#ffd800', 'center');
   cv2.drawImage(SPR.starGold, CFG.VW/2 - 54, 262);
   txt(`ЗВЁЗДЫ: ${Prog.total()}/${MAPS.length*3}`, CFG.VW/2 - 40, 264, 9, '#6ad8ff');
 }
