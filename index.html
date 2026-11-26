@@ -2518,9 +2518,9 @@ function contactPlayer(e, idx) {
 }
 /* ---------- ТРУПЫ ВРАГОВ: сплющенного можно поднять и швырнуть во врагов ----------
    Убил врага — на земле остаётся сплющенный труп (~9 с, в конце мигает).
-   Рядом с трупом появляется кнопка/клавиша F «ПОДНЯТЬ»; в руках труп сидит
-   над головой; повторное нажатие — бросок по дуге: сносит врагов (по цепочке
-   остаётся новый труп) и отрывает 1 hp хранителя (но не добивает). */
+   Труп поднимается клавишей F (на телефоне — золотая кнопка с рукой); в руках
+   труп сидит над головой; повторное нажатие — бросок по дуге: сносит врагов
+   (по цепочке остаётся новый труп) и отрывает 1 hp хранителя (но не добивает). */
 function spawnCorpse(e) {
   if (e.type === 'boss' || L.corpses.length >= 6) return;
   L.corpses.push({ x: e.x + (e.w - 14)/2, y: e.y + e.h - 7, w: 14, h: 7,
@@ -2902,17 +2902,9 @@ function renderWorld() {
   for (const s of L.seeds) { if (s.x < camX - 8 || s.x > camX + CFG.VW) continue;
     cv2.fillStyle = '#d8a04a'; cv2.fillRect(s.x - camX, s.y, 5, 5);
     cv2.fillStyle = '#8a5a20'; cv2.fillRect(s.x - camX + 1, s.y + 3, 3, 2); }
-  // трупы врагов: поднять и швырнуть; подсказка — только когда Боб рядом
+  // трупы врагов: поднять (F / кнопка на телефоне) и швырнуть — у трупа никаких плашек
   for (const c of L.corpses) { if (c.x + c.w < camX - 24 || c.x > camX + CFG.VW + 24) continue;
     drawCorpse(c); }
-  if (!P.dying && G.grabNear && !G.carry) {
-    const c = G.grabNear, hx = c.x + 7 - camX, hy = c.y - 12 + Math.sin(uiTime*6)*1.5;
-    cv2.fillStyle = 'rgba(8,10,18,.82)'; cv2.fillRect(hx - 27, hy - 6, 54, 11);
-    cv2.strokeStyle = 'rgba(255,216,0,.9)'; cv2.lineWidth = 1;
-    cv2.strokeRect(hx - 26.5, hy - 5.5, 53, 10);
-    cv2.lineWidth = 1;
-    txt(IS_TOUCH ? 'ПОДНЯТЬ' : 'F · ПОДНЯТЬ', hx, hy + 2, 7, '#ffd800', 'center');
-  }
   // пламя боссов
   for (const f of L.fireballs) { if (f.x < camX-8 || f.x > camX+CFG.VW) continue;
     cv2.drawImage(Math.floor(f.t*12)%2 ? SPR.fire1 : SPR.fire0, f.x-camX, f.y); }
@@ -3093,8 +3085,7 @@ function drawCorpse(c) {
   // труп ТОГО, кого убил: сплющенный настоящий спрайт врага
   const img = { crawler: SPR.crw1, shielder: SPR.shield, shade: SPR.bat1, fish: SPR.fsh1,
                 puffer: SPR.puf, bird: SPR.brd1 }[c.kind];
-  cv2.fillStyle = 'rgba(0,0,0,.28)'; cv2.fillRect(dx+1, dy+c.h-2, 12, 2);   // лужица-тень
-  cv2.fillStyle = 'rgba(10,12,20,.5)'; cv2.fillRect(dx-1, dy+1, 16, 7);     // тёмный контур — видно на любой земле
+  cv2.fillStyle = 'rgba(0,0,0,.28)'; cv2.fillRect(dx+1, dy+c.h-2, 12, 2);   // тонкая тень под телом
   if (img) {
     cv2.save();
     cv2.translate(c.dir > 0 ? dx + 14 : dx, dy + 1);       // лежит так, как бежал
