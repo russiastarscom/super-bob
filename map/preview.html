@@ -1,0 +1,45 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{background:#060a14;margin:0;padding:12px;font-family:monospace;color:#cde}.sheet{margin:0 0 18px 0;border:1px solid #234;padding:6px;background:#0a1020}canvas{display:block;margin:4px 0}</style></head><body><div id="host"></div><script src="maps.js"></script><script>
+const SC = 3, COLS = {
+  '#0':'g', '#':'soil', 'X':'stone', 'B':'brick', '?':'accent', 'M':'#c86aff',
+  'U':'used', '(':'pipe', ')':'pipe', '|':'pipe', '^':'#e8e8f0', 'L':'#ff7a2a',
+  '~':'#2a8ac8', 'W':'#b98a4a', 'H':'#e8c87a', 'D':'#9aa8b8', 'J':'#d8b84a',
+  'R':'#b8c8d8', 'T':'#e8b84a', 'o':'#ffd800', 'g':'#ff4a3a', 'k':'#ff8a3a',
+  'f':'#b0a0e8', 'j':'#f8e8a0', 'p':'#3ac8ff', 'q':'#ff6a9a', 'S':'#40ff40',
+  'F':'#ff4040', 'C':'#40c8ff', 'Z':'#ffe860', 'K':'#ffd84a', 'm':'#66e8e8',
+  'v':'#66e8e8', 'w':'#ff2020', 'n':'#bfe8ff', 'u':'#bfe8ff', 'a':'#dff8ff'
+};
+function drawLevel(cv, m, idx) {
+  const rows = m.rows, H = rows.length, W = rows[0].length, pal = m.pal || {};
+  cv.width = W * SC; cv.height = H * SC + 16;
+  const g = cv.getContext('2d');
+  g.fillStyle = pal.sky0 || '#101828'; g.fillRect(0, 0, cv.width, cv.height);
+  g.fillStyle = '#c8d8e8'; g.font = '10px monospace';
+  g.fillText(('' + (idx + 1)).padStart(2, '0') + ' · ' + m.name + ' · W=' + W +
+             (JSON.stringify(rows).includes('w') ? ' · БОСС' : ''), 4, 10);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const c = rows[y][x]; if (c === '.') continue;
+    let col = COLS[c] || '#ff00ff';
+    if (c === '#') col = (y > 0 && rows[y-1][x] === '#') ? (pal.soil || '#8a5a30') : (pal.grass || '#3aba3a');
+    else if (c === 'X') col = pal.stone || '#8a8a98';
+    else if (c === 'B') col = pal.brick || '#c84c0c';
+    else if (c === 'U') col = pal.used || '#9a6a3a';
+    else if (c === '?' ) col = pal.accent || '#ffd800';
+    else if (c === '(' || c === ')' || c === '|') col = pal.pipe || '#6a6a7a';
+    g.fillStyle = col;
+    g.fillRect(x * SC, 16 + y * SC, SC, SC);
+  }
+}
+window.renderAll = function () {
+  const host = document.getElementById('host');
+  const per = 8;
+  for (let s = 0; s * per < GAME_MAPS.length; s++) {
+    const div = document.createElement('div'); div.className = 'sheet';
+    for (let i = s * per; i < Math.min(GAME_MAPS.length, (s + 1) * per); i++) {
+      const cv = document.createElement('canvas');
+      drawLevel(cv, GAME_MAPS[i], i);
+      div.appendChild(cv);
+    }
+    host.appendChild(div);
+  }
+};
+renderAll();</script></body></html>
