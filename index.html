@@ -1274,6 +1274,16 @@ function fireFrame(off) {
   return c;
 }
 SPR.fire0 = fireFrame(0); SPR.fire1 = fireFrame(2);
+/* СЕМЕЧКО ПЛЕВУНА (2 кадра кувырка) — овал с контуром и бликом,
+   никаких голых квадратов в полёте */
+function seedFrame(off) {
+  const c = mkCanvas(6, 6), g = c.getContext('2d');
+  g.fillStyle = '#8a5a20'; g.fillRect(1, 0, 4, 6); g.fillRect(0, 1, 6, 4);   // тёмный овал-контур
+  g.fillStyle = '#d8a04a'; g.fillRect(1, 1, 4, 4);                           // тело семечка
+  g.fillStyle = '#f0c878'; g.fillRect(1 + off, 1, 2, 1);                     // блик, прыгает по кадру
+  return c;
+}
+SPR.seed0 = seedFrame(0); SPR.seed1 = seedFrame(2);
 
 /* ---------- ТАЙЛЫ (рисуются под палитру земли) ---------- */
 function buildTiles(p) {
@@ -2903,10 +2913,9 @@ function renderWorld() {
   // враги (только видимые; босс широкий — запас 48)
   for (const e of L.enemies) { if (e.x + e.w < camX - 48 || e.x > camX + CFG.VW + 48) continue;
     drawEnemy(e); }
-  // семена плевунов
+  // семена плевунов: кувыркающееся семечко-овал (2 кадра), не квадрат
   for (const s of L.seeds) { if (s.x < camX - 8 || s.x > camX + CFG.VW) continue;
-    cv2.fillStyle = '#d8a04a'; cv2.fillRect(s.x - camX, s.y, 5, 5);
-    cv2.fillStyle = '#8a5a20'; cv2.fillRect(s.x - camX + 1, s.y + 3, 3, 2); }
+    cv2.drawImage(Math.floor(s.t*10)%2 ? SPR.seed1 : SPR.seed0, (s.x - camX - 1) | 0, (s.y - 1) | 0); }
   // трупы врагов: поднять (F / кнопка на телефоне) и швырнуть — у трупа никаких плашек
   for (const c of L.corpses) { if (c.x + c.w < camX - 24 || c.x > camX + CFG.VW + 24) continue;
     drawCorpse(c); }
@@ -3070,10 +3079,15 @@ function drawEnemy(e) {
     if (e.dead==='flip') { cv2.save(); cv2.translate(dx+7,dy+5); cv2.scale(1,-1); cv2.fillStyle='#4aa84a'; cv2.fillRect(-7,-5,14,10); cv2.restore(); }
     else {                              // лягушка: приседает перед прыжком, глаза к Бобу
       const crouch = e.grounded && e.hopT < 0.3, dy0 = dy + (crouch ? 3 : 0), hh = 11 - (crouch ? 3 : 0);
-      cv2.fillStyle = '#4aa84a'; cv2.fillRect(dx, dy0, 14, hh);
-      cv2.fillStyle = '#2e7a2e'; cv2.fillRect(dx, dy0+hh-3, 14, 3);
-      cv2.fillStyle = '#ffd800'; cv2.fillRect(dx + (e.dir>0 ? 9 : 2), dy0+2, 3, 3);
-      cv2.fillStyle = '#0a0a12'; cv2.fillRect(dx + (e.dir>0 ? 10 : 2), dy0+3, 2, 2);
+      cv2.fillStyle = '#2e7a2e';                               // задние лапы (толчок)
+      cv2.fillRect(dx + 1, dy0 + hh - 4, 3, 4);
+      cv2.fillRect(dx + 10, dy0 + hh - 4, 3, 4);
+      cv2.fillStyle = '#4aa84a';                               // тело с горбом-головой
+      cv2.fillRect(dx + 2, dy0 + 2, 10, hh - 2);
+      cv2.fillRect(dx + 4, dy0 + 1, 6, 2);
+      cv2.fillStyle = '#2e7a2e'; cv2.fillRect(dx + 3, dy0 + hh - 2, 8, 2);     // брюшная тень
+      cv2.fillStyle = '#ffd800'; cv2.fillRect(dx + (e.dir>0 ? 9 : 4), dy0, 3, 3); // глаз на горбе
+      cv2.fillStyle = '#0a0a12'; cv2.fillRect(dx + (e.dir>0 ? 10 : 5), dy0 + 1, 2, 2);
     }
   } else if (e.type==='spitter') {
     const spit = e.spitT > 0;           // растение: стебель + бутон, при плевке раскрывается
